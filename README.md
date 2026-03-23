@@ -214,6 +214,30 @@ MIT License
 
 ## 🙏 Credits / Благодарности
 
+### 💝 Special Thanks / Особая благодарность
+
+**🇷🇺 Огромная благодарность за помощь в отладке и тестировании этого проекта:**
+
+**Моей любимой жене** — за бесконечное терпение, поддержку и тестирование реакций 👀
+
+**Моему сыну** — за энтузиазм и помощь в проверке работы скрипта
+
+**Сан Санычу** — за ценные советы и активное участие в тестировании mesh-связи
+
+---
+
+**🇬🇧 Huge thanks for help with debugging and testing this project:**
+
+**To my beloved wife** — for endless patience, support, and testing reactions 👀
+
+**To my son** — for enthusiasm and help with script testing
+
+**To San Sanych** — for valuable advice and active participation in mesh communication testing
+
+---
+
+### 🛠️ Technical Credits
+
 - [Telethon](https://github.com/LonamiWebs/Telethon) - Telegram client library
 - [Meshtastic](https://github.com/meshtastic) - Mesh network project
 - [Meshtastic Python](https://github.com/meshtastic/python) - Meshtastic Python library
