@@ -15,8 +15,16 @@ TeleMesh — это мощный мост между Telegram и Meshtastic, п�
 - **Автоматическое разбиение** — длинные сообщения разбиваются на части с нумерацией `[1/2], [2/2]`
 - **Ограничение длины** — настраиваемое ограничение длины сообщений для mesh-сети
 
+#### 📒 Записная книжка (Contact Book)
+- **Добавление контактов** — команда `!add` (или `!добавить`) при ответе на сообщение добавляет пользователя Telegram в записную книжку
+- **Список контактов** — команда `!list` (или `!список`) выводит всех сохранённых пользователей с номерами
+- **Удаление контактов** — команда `!del` (или `!удалить`) удаляет запись по номеру или текущего пользователя (при ответе)
+- **Отправка контактам** — формат `!5 Привет` отправляет сообщение контакту под номером 5
+- **Отправка по @username** — формат `@username сообщение` отправляет сообщение пользователю Telegram по его юзернейму
+- **Персистентность** — контакты сохраняются в файл `contacts_<ID_ноды>.json` (разные файлы для разных целевых нод)
+
 #### 😀 Реакции
-- **TG → Mesh** — реакции из Telegram пересылаются в Meshtastic
+- **TG → Mesh** — реакции из Telegram пересылаются в Meshtastic (поддерживаются как обычные сообщения, так и сообщения, отправленные через `!n` или `@username`)
 - **Mesh → TG** — реакции из Mesh отправляются автору оригинального сообщения в Telegram
 - **Fallback в текст** — если реакция не может быть отправлена нативно, она приходит текстом с подписью
 
@@ -58,6 +66,10 @@ TeleMesh — это мощный мост между Telegram и Meshtastic, п�
 - Настраиваемая подпись к сообщениям из Mesh
 - По умолчанию: `📡 Отправлено из меш-сети с помощью 📟 TeleMesh`
 
+#### 🚀 Дополнительные возможности
+- **Флаг `--no-welcome`** — при запуске не отправляет приветственное сообщение в Mesh (полезно для перезапусков)
+- **Динамические файлы контактов** — для каждого `DEST_NODE_ID` своя записная книжка, что позволяет использовать один экземпляр скрипта с разными целевыми нодами
+
 #### 🐛 Режим отладки
 - Детальное логирование всех операций
 - Отладочная информация о пакетах, кэше, маршрутизации
@@ -75,10 +87,18 @@ TeleMesh is a powerful bridge between Telegram and Meshtastic, allowing Telegram
 - **Automatic splitting** — long messages are split into parts with numbering `[1/2], [2/2]`
 - **Length limiting** — configurable message length limit for mesh network
 
+#### 📒 Contact Book
+- **Add contacts** — command `!add` (or `!добавить`) when replying to a message adds the Telegram user to the contact book
+- **List contacts** — command `!list` (or `!список`) shows all saved users with their slot numbers
+- **Delete contacts** — command `!del` (or `!удалить`) deletes a record by slot number or the current user (when replying)
+- **Send to contact by slot** — format `!5 Hello` sends a message to the contact in slot 5
+- **Send by @username** — format `@username message` sends a message to a Telegram user by their username
+- **Persistence** — contacts are stored in `contacts_<node_id>.json` (separate files for different target nodes)
+
 #### 😀 Reactions
-- **TG → Mesh** — reactions from Telegram are forwarded to Meshtastic
+- **TG → Mesh** — reactions from Telegram are forwarded to Meshtastic (works for both regular messages and those sent via `!n` or `@username`)
 - **Mesh → TG** — reactions from Mesh are sent to the original message author in Telegram
-- **Text fallback** — if reaction cannot be sent natively, it arrives as text with signature
+- **Text fallback** — if a reaction cannot be sent natively, it arrives as text with signature
 
 #### ↩️ Reply Tracking
 - When replying to a Mesh message in Telegram, the reply goes to the **original author**, not the last sender
@@ -117,6 +137,10 @@ TeleMesh is a powerful bridge between Telegram and Meshtastic, allowing Telegram
 #### 📝 Signatures
 - Configurable signature for messages from Mesh
 - Default: `📡 Отправлено из меш-сети с помощью 📟 TeleMesh`
+
+#### 🚀 Additional Features
+- **`--no-welcome` flag** — suppresses the welcome message sent to Mesh on startup (useful for restarts)
+- **Dynamic contact files** — each `DEST_NODE_ID` has its own contact book, allowing one script instance to work with different target nodes
 
 #### 🐛 Debug Mode
 - Detailed logging of all operations
@@ -181,6 +205,11 @@ SIGNATURE = """
 ```bash
 python telemesh_v1.4.py my_acc.py
 ```
+To suppress the welcome message in Mesh:
+
+```bash
+python telemesh_1.5.003.py my_acc.py --no-welcome
+```
 
 ---
 
@@ -190,11 +219,15 @@ python telemesh_v1.4.py my_acc.py
 |---------|----------------|----------------|
 | `!стоп` / `!stop` | Приостановить пересылку | Pause forwarding |
 | `!старт` / `!start` | Возобновить пересылку | Resume forwarding |
+| `!add` / `!добавить` | Добавить пользователя в записную книжку (только ответ) | Add user to contact book (reply only) |
+| `!list` / `!список` | Показать записную книжку | Show contact book |
+| `!del` / `!удалить` [номер] | Удалить контакт (по номеру или текущего при ответе) | Delete contact (by slot or current when replying) |
+| `!5 Привет` | Отправить сообщение контакту под номером 5 | Send message to contact in slot 5 |
+| `@username сообщение` | Отправить сообщение пользователю Telegram по юзернейму | Send message to Telegram user by username |
 
 > ⚠️ Commands work **from Mesh only** for security reasons.
 > 
 > ⚠️ Команды работают **только из Mesh** по соображениям безопасности.
-
 ---
 
 ## 📋 Requirements / Требования
