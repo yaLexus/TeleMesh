@@ -23,6 +23,17 @@ TeleMesh — это мощный мост между Telegram и Meshtastic, п�
 - **Отправка по @username** — формат `@username сообщение` отправляет сообщение пользователю Telegram по его юзернейму
 - **Персистентность** — контакты сохраняются в файл `contacts_<ID_ноды>.json` (разные файлы для разных целевых нод)
 
+#### ⛔ Чёрный список (Blacklist)
+- **Добавление в чёрный список** — команда `#add` (или `#добавить`) при ответе на сообщение блокирует пользователя Telegram
+- **Список чёрного списка** — команда `#list` (или `#список`) показывает всех заблокированных пользователей
+- **Удаление из чёрного списка** — команда `#del` (или `#удалить`) удаляет запись по номеру или текущего пользователя (при ответе)
+- **Автоматическое игнорирование** — сообщения от заблокированных пользователей не пересылаются в Mesh
+- **Персистентность** — чёрный список сохраняется в файл `blacklist_<ID_ноды>.json`
+
+#### 💾 Сохранение состояния пересылки
+- Состояние `FORWARD_ENABLED` автоматически сохраняется при командах `!stop` / `!start` и восстанавливается после перезапуска скрипта
+- Файл состояния: `forward_state_<ID_ноды>.json`
+
 #### 😀 Реакции
 - **TG → Mesh** — реакции из Telegram пересылаются в Meshtastic (поддерживаются как обычные сообщения, так и сообщения, отправленные через `!n` или `@username`)
 - **Mesh → TG** — реакции из Mesh отправляются автору оригинального сообщения в Telegram
@@ -47,8 +58,8 @@ TeleMesh — это мощный мост между Telegram и Meshtastic, п�
 - Поддержка Environment Metrics (температура, влажность и т.д.)
 
 #### 🎮 Управляющие команды
-- `!стоп` / `!stop` — приостановить пересылку
-- `!старт` / `!start` — возобновить пересылку
+- `!стоп` / `!stop` — приостановить пересылку (состояние сохраняется)
+- `!старт` / `!start` — возобновить пересылку (состояние сохраняется)
 - Управление **только из Mesh** для безопасности
 - Нормализация команд: `! старт`, `! Cтapт` (лат+кир) → распознаются корректно
 
@@ -68,7 +79,7 @@ TeleMesh — это мощный мост между Telegram и Meshtastic, п�
 
 #### 🚀 Дополнительные возможности
 - **Флаг `--no-welcome`** — при запуске не отправляет приветственное сообщение в Mesh (полезно для перезапусков)
-- **Динамические файлы контактов** — для каждого `DEST_NODE_ID` своя записная книжка, что позволяет использовать один экземпляр скрипта с разными целевыми нодами
+- **Динамические файлы контактов и чёрного списка** — для каждого `DEST_NODE_ID` свои файлы, что позволяет использовать один экземпляр скрипта с разными целевыми нодами
 
 #### 🐛 Режим отладки
 - Детальное логирование всех операций
@@ -95,6 +106,17 @@ TeleMesh is a powerful bridge between Telegram and Meshtastic, allowing Telegram
 - **Send by @username** — format `@username message` sends a message to a Telegram user by their username
 - **Persistence** — contacts are stored in `contacts_<node_id>.json` (separate files for different target nodes)
 
+#### ⛔ Blacklist
+- **Add to blacklist** — command `#add` (or `#добавить`) when replying to a message blocks the Telegram user
+- **List blacklist** — command `#list` (or `#список`) shows all blocked users
+- **Remove from blacklist** — command `#del` (or `#удалить`) deletes a record by slot number or the current user (when replying)
+- **Automatic ignore** — messages from blacklisted users are not forwarded to Mesh
+- **Persistence** — blacklist is stored in `blacklist_<node_id>.json`
+
+#### 💾 Forward State Persistence
+- The `FORWARD_ENABLED` state is automatically saved when using `!stop` / `!start` commands and restored after script restart
+- State file: `forward_state_<node_id>.json`
+
 #### 😀 Reactions
 - **TG → Mesh** — reactions from Telegram are forwarded to Meshtastic (works for both regular messages and those sent via `!n` or `@username`)
 - **Mesh → TG** — reactions from Mesh are sent to the original message author in Telegram
@@ -119,8 +141,8 @@ TeleMesh is a powerful bridge between Telegram and Meshtastic, allowing Telegram
 - Environment Metrics support (temperature, humidity, etc.)
 
 #### 🎮 Control Commands
-- `!stop` / `!стоп` — pause forwarding
-- `!start` / `!старт` — resume forwarding
+- `!stop` / `!стоп` — pause forwarding (state is saved)
+- `!start` / `!старт` — resume forwarding (state is saved)
 - Control **from Mesh only** for security
 - Command normalization: `! start`, `! Cтapт` (mixed Latin+Cyrillic) → recognized correctly
 
@@ -140,7 +162,7 @@ TeleMesh is a powerful bridge between Telegram and Meshtastic, allowing Telegram
 
 #### 🚀 Additional Features
 - **`--no-welcome` flag** — suppresses the welcome message sent to Mesh on startup (useful for restarts)
-- **Dynamic contact files** — each `DEST_NODE_ID` has its own contact book, allowing one script instance to work with different target nodes
+- **Dynamic contact and blacklist files** — each `DEST_NODE_ID` has its own files, allowing one script instance to work with different target nodes
 
 #### 🐛 Debug Mode
 - Detailed logging of all operations
@@ -217,17 +239,21 @@ python telemesh.py my_acc --no-welcome
 
 | Command | Description RU | Description EN |
 |---------|----------------|----------------|
-| `!стоп` / `!stop` | Приостановить пересылку | Pause forwarding |
-| `!старт` / `!start` | Возобновить пересылку | Resume forwarding |
+| `!стоп` / `!stop` | Приостановить пересылку (состояние сохраняется) | Pause forwarding (state saved) |
+| `!старт` / `!start` | Возобновить пересылку (состояние сохраняется) | Resume forwarding (state saved) |
 | `!add` / `!добавить` | Добавить пользователя в записную книжку (только ответ) | Add user to contact book (reply only) |
 | `!list` / `!список` | Показать записную книжку | Show contact book |
 | `!del` / `!удалить` [номер] | Удалить контакт (по номеру или текущего при ответе) | Delete contact (by slot or current when replying) |
+| `#add` / `#добавить` | Добавить пользователя в чёрный список (только ответ) | Add user to blacklist (reply only) |
+| `#list` / `#список` | Показать чёрный список | Show blacklist |
+| `#del` / `#удалить` [номер] | Удалить из чёрного списка (по номеру или текущего при ответе) | Remove from blacklist (by slot or current when replying) |
 | `!5 Привет` | Отправить сообщение контакту под номером 5 | Send message to contact in slot 5 |
 | `@username сообщение` | Отправить сообщение пользователю Telegram по юзернейму | Send message to Telegram user by username |
 
 > ⚠️ Commands work **from Mesh only** for security reasons.
 > 
 > ⚠️ Команды работают **только из Mesh** по соображениям безопасности.
+
 ---
 
 ## 📋 Requirements / Требования
@@ -236,7 +262,6 @@ python telemesh.py my_acc --no-welcome
 - Telegram API credentials
 - Meshtastic device (connected via TCP or Serial)
 - Telegram account (bot not required)
-
 ---
 
 ## 📄 License / Лицензия
