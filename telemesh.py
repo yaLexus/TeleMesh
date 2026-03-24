@@ -1,4 +1,4 @@
-# telemesh_1.5.003.py
+# telemesh_1.5.005.py
 import sys
 import os
 import asyncio
@@ -25,7 +25,7 @@ import requests
 from urllib.parse import urlparse
 
 # --------------------- Версия ---------------------
-VERSION = "1.5.003"
+VERSION = "1.5.005"
 
 # --------------------- Временные переменные ---------------------
 API_ID = None
@@ -165,6 +165,7 @@ interface = None
 
 # Словарь для отслеживания сообщений, ожидающих обработки
 pending_acks = {}
+pending_acks_lock = Lock()
 ack_event_queue = queue.Queue()
 
 # --------------------- НОВЫЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---------------------
@@ -991,6 +992,9 @@ def on_meshtastic_receive(packet, interface, topic=None):
                 logger.info(f"← Команда от !{normalize_node_id(from_id)}: {text}")
                 if forward_enabled:
                     forward_enabled = False
+                    # Очищаем очередь ожидающих ACK сообщений
+                    with pending_acks_lock:
+                        pending_acks.clear()
                     send_to_meshtastic("⚠️ Пересылка ОСТАНОВЛЕНА", want_ack=False)
                 else: 
                     send_to_meshtastic("ℹ️ Пересылка уже остановлена", want_ack=False)
@@ -1312,7 +1316,8 @@ async def handle_new_message(event):
     
     # Управление пересылкой только через Mesh
     if not forward_enabled:
-        await event.reply("⚠️ Пересылка остановлена.")
+        # Не отправляем ответ в Telegram, просто игнорируем
+        # Это предотвращает отправку сообщения "⚠️ Пересылка остановлена."
         return
 
     text = event.message.message.strip() if event.message.message else ""
@@ -1359,14 +1364,15 @@ async def handle_new_message(event):
         packet_id = send_to_meshtastic(part, want_ack=True, user_id=sender.id, msg_id=reply_to_id)
         
         if packet_id is not None:
-            pending_acks[packet_id] = {
-                'text': part,
-                'user_id': sender.id,
-                'msg_id': reply_to_id,
-                'retries': 0,
-                'stage': 'wait_ack',
-                'next_action_time': time.time() + ACK_TIMEOUT
-            }
+            with pending_acks_lock:
+                pending_acks[packet_id] = {
+                    'text': part,
+                    'user_id': sender.id,
+                    'msg_id': reply_to_id,
+                    'retries': 0,
+                    'stage': 'wait_ack',
+                    'next_action_time': time.time() + ACK_TIMEOUT
+                }
             logger.debug(f"Пакет {packet_id} добавлен в очередь (Wait ACK).")
         else:
             # Сокращаем текст в предупреждении до 30 символов
@@ -1558,68 +1564,76 @@ async def ack_monitor_loop():
                     event = ack_event_queue.get_nowait()
                     if event['type'] == 'ack_received':
                         pid = event['id']
-                        if pid in pending_acks:
-                            msg_info = pending_acks[pid]
-                            logger.info(f"✓ Доставка подтверждена (ACK) для ID {pid}: \"{msg_info['text'][:30]}...\"")
-                            del pending_acks[pid]
+                        with pending_acks_lock:
+                            if pid in pending_acks:
+                                msg_info = pending_acks[pid]
+                                logger.info(f"✓ Доставка подтверждена (ACK) для ID {pid}: \"{msg_info['text'][:30]}...\"")
+                                del pending_acks[pid]
             except queue.Empty:
                 pass
 
             now = time.time()
-            for pid in list(pending_acks.keys()):
-                msg_info = pending_acks[pid]
-                
-                if now < msg_info['next_action_time']:
-                    continue
-                
-                if msg_info['stage'] == 'wait_ack':
-                    msg_info['retries'] += 1
+            with pending_acks_lock:
+                for pid in list(pending_acks.keys()):
+                    msg_info = pending_acks[pid]
                     
-                    if msg_info['retries'] > MAX_RETRIES:
-                        logger.error(f"❌ Не удалось доставить сообщение после {MAX_RETRIES} попыток: {msg_info['text']}")
+                    if now < msg_info['next_action_time']:
+                        continue
+                    
+                    if msg_info['stage'] == 'wait_ack':
+                        msg_info['retries'] += 1
                         
-                        if FAIL_MSG:
-                            telegram_queue.put({
-                                'user_id': msg_info['user_id'],
-                                'message': FAIL_MSG,
-                                'msg_id': msg_info['msg_id']
-                            })
+                        if msg_info['retries'] > MAX_RETRIES:
+                            logger.error(f"❌ Не удалось доставить сообщение после {MAX_RETRIES} попыток: {msg_info['text']}")
+                            
+                            if FAIL_MSG:
+                                telegram_queue.put({
+                                    'user_id': msg_info['user_id'],
+                                    'message': FAIL_MSG,
+                                    'msg_id': msg_info['msg_id']
+                                })
+                            
+                            del pending_acks[pid]
+                            continue
+
+                        delay = msg_info['retries'] * ACK_TIMEOUT
+                        
+                        msg_info['stage'] = 'wait_retry'
+                        msg_info['next_action_time'] = now + delay
+                        
+                        logger.warning(f"Таймаут ACK для {pid}. Попытка {msg_info['retries']}/{MAX_RETRIES}. Повтор через {delay} сек.")
+                    
+                    elif msg_info['stage'] == 'wait_retry':
+                        # Проверяем, не отключена ли пересылка перед повторной отправкой
+                        if not forward_enabled:
+                            logger.info(f"Пересылка остановлена, отменяем повторную отправку для ID {pid}")
+                            del pending_acks[pid]
+                            continue
+                        
+                        new_pid = send_to_meshtastic(
+                            msg_info['text'], 
+                            want_ack=True, 
+                            user_id=msg_info['user_id'], 
+                            msg_id=msg_info['msg_id']
+                        )
                         
                         del pending_acks[pid]
-                        continue
-
-                    delay = msg_info['retries'] * ACK_TIMEOUT
-                    
-                    msg_info['stage'] = 'wait_retry'
-                    msg_info['next_action_time'] = now + delay
-                    
-                    logger.warning(f"Таймаут ACK для {pid}. Попытка {msg_info['retries']}/{MAX_RETRIES}. Повтор через {delay} сек.")
-                
-                elif msg_info['stage'] == 'wait_retry':
-                    new_pid = send_to_meshtastic(
-                        msg_info['text'], 
-                        want_ack=True, 
-                        user_id=msg_info['user_id'], 
-                        msg_id=msg_info['msg_id']
-                    )
-                    
-                    del pending_acks[pid]
-                    
-                    if new_pid is not None:
-                        pending_acks[new_pid] = {
-                            'text': msg_info['text'],
-                            'user_id': msg_info['user_id'],
-                            'msg_id': msg_info['msg_id'],
-                            'retries': msg_info['retries'],
-                            'stage': 'wait_ack',
-                            'next_action_time': now + ACK_TIMEOUT
-                        }
-                        logger.info(f"Повторная отправка выполнена. Новый ID {new_pid}. Ждем ACK {ACK_TIMEOUT} сек.")
-                    else:
-                        logger.error("Ошибка повторной отправки (send returned None).")
-                        pending_acks[pid] = msg_info
-                        pending_acks[pid]['stage'] = 'wait_retry'
-                        pending_acks[pid]['next_action_time'] = now + ACK_TIMEOUT
+                        
+                        if new_pid is not None:
+                            pending_acks[new_pid] = {
+                                'text': msg_info['text'],
+                                'user_id': msg_info['user_id'],
+                                'msg_id': msg_info['msg_id'],
+                                'retries': msg_info['retries'],
+                                'stage': 'wait_ack',
+                                'next_action_time': now + ACK_TIMEOUT
+                            }
+                            logger.info(f"Повторная отправка выполнена. Новый ID {new_pid}. Ждем ACK {ACK_TIMEOUT} сек.")
+                        else:
+                            logger.error("Ошибка повторной отправки (send returned None).")
+                            pending_acks[pid] = msg_info
+                            pending_acks[pid]['stage'] = 'wait_retry'
+                            pending_acks[pid]['next_action_time'] = now + ACK_TIMEOUT
 
             await asyncio.sleep(1)
         except Exception as e:
