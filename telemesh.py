@@ -1,10 +1,11 @@
+# telemesh_1.5.003.py
 import sys
 import os
 import asyncio
 import logging
 import json
 from datetime import datetime
-from threading import Thread
+from threading import Thread, Lock
 import queue
 import time
 from collections import OrderedDict
@@ -24,7 +25,7 @@ import requests
 from urllib.parse import urlparse
 
 # --------------------- Версия ---------------------
-VERSION = "1.4.042"
+VERSION = "1.5.003"
 
 # --------------------- Временные переменные ---------------------
 API_ID = None
@@ -175,6 +176,19 @@ mesh_msg_cache = OrderedDict()
 # Обратный кэш: tg_msg_id -> mesh_packet_id
 # Используется при получении реакций в TG для определения сообщения в Mesh
 tg_to_mesh_cache = OrderedDict()
+
+# Записная книжка: {slot: {'id': int, 'name': str, 'username': str}}
+contact_book = {}
+contact_book_lock = Lock()
+
+# Ссылка на event loop для планирования async задач из синхронных коллбэков
+EVENT_LOOP = None
+
+# Флаг отключения приветственного сообщения в Mesh (из командной строки)
+NO_WELCOME = False
+
+# Путь к файлу записной книжки (будет установлен после загрузки DEST_NODE_ID)
+CONTACT_BOOK_FILE = None
 
 # --------------------- Логирование ---------------------
 logging.basicConfig(
@@ -376,41 +390,336 @@ def compare_node_ids(id1, id2):
     if DEBUG: logger.debug(f"Сравнение ID: {id1}->{n1}, {id2}->{n2}")
     return n1 == n2
 
-def normalize_command_text(text: str) -> str:
+# --------------------- Нормализация текста для распознавания команд ---------------------
+# Карта для замены латинских букв, визуально похожих на кириллические, на кириллицу
+LAT_TO_CYR_MAP = {
+    'c': 'с',
+    'a': 'а',
+    'o': 'о',
+    'p': 'р',
+    'x': 'х',
+    'y': 'у',
+    'e': 'е',  # латинская e -> кириллическая е
+    'k': 'к',
+    'm': 'м',
+    't': 'т',
+    'b': 'в',
+    'h': 'н',
+}
+
+def normalize_command_str(text: str) -> str:
     """
-    Нормализация текста команды для сравнения.
-    
-    1. Удаляет пробелы и любые пробельные символы после '!'
-       Пример: '! старт' -> '!старт', '!  старт' -> '!старт'
-    
-    2. Заменяет похожие латинские буквы на кириллицу
-       Проблема: на Meshtastic устройствах при вводе могут смешиваться
-       латинские и кириллические символы, которые выглядят одинаково.
-       Пример: '! Cтapт' содержит: C (лат), т (кир), a (лат), p (лат), т (кир)
-    
-    3. Приводит к нижнему регистру
+    Нормализует строку команды для сравнения:
+    - приводит к нижнему регистру
+    - удаляет все пробельные символы после '!'
+    - заменяет латинские буквы, похожие на кириллические, на кириллицу
     """
-    # Маппинг латинских букв на кириллические аналоги
-    lat_to_cyr = {
-        'a': 'а', 'c': 'с', 'e': 'е', 'o': 'о', 'p': 'р', 
-        'x': 'х', 'y': 'у'
-    }
+    if not text:
+        return ""
     
-    result = text
+    # Приводим к нижнему регистру
+    result = text.lower()
     
     # Если начинается с '!', удаляем все пробельные символы после неё
     if result.startswith('!'):
         # Пропускаем '!' и удаляем все пробельные символы в начале остатка
         result = '!' + result[1:].lstrip()
     
-    # Приводим к нижнему регистру
-    result = result.lower()
-    
     # Заменяем латинские буквы на кириллицу
-    for lat, cyr in lat_to_cyr.items():
+    for lat, cyr in LAT_TO_CYR_MAP.items():
         result = result.replace(lat, cyr)
     
     return result
+
+# Наборы нормализованных команд
+COMMAND_START = {normalize_command_str(cmd) for cmd in ['!start', '!старт', '!cтapт']}
+COMMAND_STOP = {normalize_command_str(cmd) for cmd in ['!stop', '!стоп', '!cтoп']}
+COMMAND_ADD = {normalize_command_str(cmd) for cmd in ['!add', '!добавить', '!дoбaвить']}
+COMMAND_LIST = {normalize_command_str(cmd) for cmd in ['!list', '!список', '!cпиcoк']}
+COMMAND_DEL = {normalize_command_str(cmd) for cmd in ['!del', '!удалить', '!yдaлить']}
+
+# Словарь для быстрого поиска команды по нормализованному тексту
+COMMAND_MAP = {
+    **{cmd: 'start' for cmd in COMMAND_START},
+    **{cmd: 'stop' for cmd in COMMAND_STOP},
+    **{cmd: 'add' for cmd in COMMAND_ADD},
+    **{cmd: 'list' for cmd in COMMAND_LIST},
+    **{cmd: 'del' for cmd in COMMAND_DEL},
+}
+
+def parse_mesh_command(text: str):
+    """
+    Распознаёт команду из текста и возвращает (command_type, argument).
+    command_type может быть 'start', 'stop', 'add', 'list', 'del' или None.
+    argument – число (как int) или None.
+    """
+    if not text:
+        return None, None
+    
+    # Нормализуем текст
+    norm = normalize_command_str(text)
+    
+    # Разделяем на команду и аргумент
+    parts = norm.split()
+    if not parts:
+        return None, None
+    
+    cmd_str = parts[0]  # нормализованная команда
+    arg_str = parts[1] if len(parts) > 1 else None
+    
+    # Проверяем, есть ли команда в словаре
+    if cmd_str in COMMAND_MAP:
+        command = COMMAND_MAP[cmd_str]
+        # Пытаемся извлечь аргумент
+        arg = None
+        if arg_str and arg_str.isdigit():
+            arg = int(arg_str)
+        return command, arg
+    
+    return None, None
+
+# --------------------- Записная книжка ---------------------
+def load_contacts():
+    """Загружает записную книжку из файла."""
+    global contact_book
+    if CONTACT_BOOK_FILE is None:
+        logger.warning("CONTACT_BOOK_FILE не установлен, пропускаем загрузку.")
+        return
+    file_path = os.path.join(ACC_BD_PATH, CONTACT_BOOK_FILE)
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # Преобразуем ключи в int, если они были строками
+                contact_book = {int(k): v for k, v in data.items()}
+                logger.info(f"Записная книжка загружена из {file_path} ({len(contact_book)} записей)")
+        else:
+            contact_book = {}
+            logger.info(f"Файл записной книжки {file_path} не найден. Создана пустая.")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки записной книжки: {e}")
+        contact_book = {}
+
+def save_contacts():
+    """Сохраняет записную книжку в файл."""
+    if CONTACT_BOOK_FILE is None:
+        logger.warning("CONTACT_BOOK_FILE не установлен, пропускаем сохранение.")
+        return
+    file_path = os.path.join(ACC_BD_PATH, CONTACT_BOOK_FILE)
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(contact_book, f, ensure_ascii=False, indent=2)
+        logger.debug(f"Записная книжка сохранена в {file_path}")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения записной книжки: {e}")
+
+def get_next_free_slot():
+    """Возвращает первый свободный целочисленный слот (начиная с 1)."""
+    if not contact_book:
+        return 1
+    slots = sorted(contact_book.keys())
+    for i in range(1, len(slots) + 2):
+        if i not in slots:
+            return i
+    return len(slots) + 1
+
+def add_contact(tg_user_id, name, username, slot=None):
+    """Добавляет или обновляет запись в записной книжке.
+    Если slot не указан, выбирается первый свободный.
+    Возвращает использованный слот.
+    """
+    with contact_book_lock:
+        if slot is None:
+            slot = get_next_free_slot()
+        contact_book[slot] = {
+            'id': tg_user_id,
+            'name': name,
+            'username': username
+        }
+        save_contacts()
+        return slot
+
+def delete_contact_by_user_id(tg_user_id):
+    """Удаляет запись по ID пользователя. Возвращает удалённый слот или None."""
+    with contact_book_lock:
+        for slot, info in list(contact_book.items()):
+            if info.get('id') == tg_user_id:
+                del contact_book[slot]
+                save_contacts()
+                return slot
+        return None
+
+def delete_contact_by_slot(slot):
+    """Удаляет запись по номеру слота. Возвращает True, если удаление произошло."""
+    with contact_book_lock:
+        if slot in contact_book:
+            del contact_book[slot]
+            save_contacts()
+            return True
+        return False
+
+def get_contact_slot_by_user_id(tg_user_id):
+    """Возвращает слот для заданного ID пользователя или None."""
+    with contact_book_lock:
+        for slot, info in contact_book.items():
+            if info.get('id') == tg_user_id:
+                return slot
+        return None
+
+def get_contact_by_slot(slot):
+    """Возвращает информацию о контакте по слоту или None."""
+    with contact_book_lock:
+        return contact_book.get(slot)
+
+def format_contact_list():
+    """Форматирует список контактов для отправки в Mesh."""
+    with contact_book_lock:
+        if not contact_book:
+            return "📒 Записная книжка пуста."
+        lines = ["📒 Записная книжка:"]
+        for slot in sorted(contact_book.keys()):
+            info = contact_book[slot]
+            name = info.get('name', 'Неизвестно')
+            username = info.get('username', '')
+            if username:
+                lines.append(f"{slot}: {name} (@{username})")
+            else:
+                lines.append(f"{slot}: {name}")
+        return "\n".join(lines)
+
+# --------------------- Отправка в Telegram по слоту/юзернейму ---------------------
+async def send_to_contact_by_slot(slot: int, message: str, mesh_packet_id: int = None):
+    """Отправляет сообщение в Telegram контакту по номеру слота.
+    Если передан mesh_packet_id, он будет связан с отправленным сообщением для поддержки реакций."""
+    contact = get_contact_by_slot(slot)
+    if not contact:
+        response = f"⚠️ Контакт с номером {slot} не найден в записной книжке."
+        send_to_meshtastic(response, want_ack=False)
+        return
+    
+    tg_user_id = contact['id']
+    # Формируем сообщение с подписью
+    full_message = format_message_with_signature(message)
+    
+    # Добавляем в очередь для отправки в Telegram, передаём mesh_packet_id для кэширования
+    telegram_queue.put({
+        'user_id': tg_user_id,
+        'message': full_message,
+        'mesh_packet_id': mesh_packet_id  # сохраняем связь для реакций
+    })
+    logger.info(f"→ Сообщение добавлено в очередь для контакта {slot} (TG ID: {tg_user_id}, mesh_packet_id={mesh_packet_id})")
+    
+    # Отправляем подтверждение в Mesh
+    name = contact.get('name', 'пользователь')
+    username = contact.get('username', '')
+    if username:
+        response = f"✅ Сообщение отправлено пользователю {name} (@{username})"
+    else:
+        response = f"✅ Сообщение отправлено пользователю {name}"
+    send_to_meshtastic(response, want_ack=False)
+
+async def send_to_contact_by_username(username: str, message: str, mesh_packet_id: int = None):
+    """Отправляет сообщение в Telegram пользователю по @username.
+    Если передан mesh_packet_id, он будет связан с отправленным сообщением для поддержки реакций."""
+    # Ищем пользователя в записной книжке
+    target_user_id = None
+    target_name = None
+    with contact_book_lock:
+        for slot, info in contact_book.items():
+            if info.get('username', '').lower() == username.lower():
+                target_user_id = info['id']
+                target_name = info.get('name', 'пользователь')
+                break
+    
+    if target_user_id is None:
+        # Попробуем найти пользователя через Telegram API по username
+        try:
+            entity = await client.get_entity(f"@{username}")
+            target_user_id = entity.id
+            target_name = f"{entity.first_name or ''} {entity.last_name or ''}".strip() or entity.username
+        except Exception as e:
+            logger.error(f"Не удалось найти пользователя @{username}: {e}")
+            response = f"⚠️ Пользователь @{username} не найден в Telegram."
+            send_to_meshtastic(response, want_ack=False)
+            return
+    
+    # Отправляем сообщение
+    full_message = format_message_with_signature(message)
+    telegram_queue.put({
+        'user_id': target_user_id,
+        'message': full_message,
+        'mesh_packet_id': mesh_packet_id
+    })
+    logger.info(f"→ Сообщение добавлено в очередь для пользователя @{username} (TG ID: {target_user_id}, mesh_packet_id={mesh_packet_id})")
+    
+    response = f"✅ Сообщение отправлено пользователю @{username}"
+    send_to_meshtastic(response, want_ack=False)
+
+# --------------------- Асинхронная обработка команд записной книжки ---------------------
+async def handle_contact_command(command, arg, original_user_id, packet_id):
+    """
+    Асинхронно обрабатывает команду записной книжки.
+    command: 'add', 'list', 'del'
+    arg: номер слота (int) или None
+    original_user_id: ID пользователя Telegram, к которому относится команда (для add/del)
+    packet_id: ID исходного Mesh пакета (не используется для ответа, но можно передать)
+    """
+    try:
+        if command == 'add':
+            # Добавляем пользователя
+            if original_user_id is None:
+                response = "⚠️ Команда !add должна быть ответом на сообщение из Telegram."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            
+            # Получаем информацию о пользователе из Telegram
+            try:
+                user = await client.get_entity(original_user_id)
+                name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username or str(user.id)
+                username = user.username or ""
+            except Exception as e:
+                logger.error(f"Не удалось получить информацию о пользователе {original_user_id}: {e}")
+                response = f"⚠️ Не удалось получить данные пользователя (ID: {original_user_id})."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            
+            # Добавляем в записную книжку
+            slot = add_contact(original_user_id, name, username, arg)
+            response = f"✅ Пользователь {name} (@{username}) добавлен в записную книжку под номером {slot}."
+            send_to_meshtastic(response, want_ack=False)
+        
+        elif command == 'del':
+            # Удаляем пользователя
+            if arg is not None:
+                # Удаляем по номеру слота
+                if delete_contact_by_slot(arg):
+                    response = f"🗑 Запись №{arg} удалена из записной книжки."
+                else:
+                    response = f"⚠️ Запись №{arg} не найдена."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            
+            # Иначе удаляем текущего пользователя (если команда была ответом)
+            if original_user_id is None:
+                response = "⚠️ Команда !del должна быть ответом на сообщение из Telegram или содержать номер записи."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            
+            slot = delete_contact_by_user_id(original_user_id)
+            if slot is not None:
+                response = f"🗑 Пользователь удалён из записной книжки (слот {slot})."
+            else:
+                response = "⚠️ Пользователь не найден в записной книжке."
+            send_to_meshtastic(response, want_ack=False)
+        
+        elif command == 'list':
+            # Отправляем список
+            response = format_contact_list()
+            send_to_meshtastic(response, want_ack=False)
+    
+    except Exception as e:
+        logger.error(f"Ошибка обработки команды {command}: {e}", exc_info=True)
+        send_to_meshtastic(f"⚠️ Ошибка при обработке команды: {e}", want_ack=False)
 
 # --------------------- Загрузка параметров ---------------------
 def load_acc_data(config_file):
@@ -516,8 +825,9 @@ def on_meshtastic_connect(interface, topic=None):
         
         welcome_msg = "\n".join(msg_lines)
         
-        # Отправляем в Mesh
-        send_to_meshtastic(welcome_msg, want_ack=False)
+        # Отправляем в Mesh, если не запрещено
+        if not NO_WELCOME:
+            send_to_meshtastic(welcome_msg, want_ack=False)
         
         # Отправляем в Telegram Admin
         if ADMIN_CHAT_ID:
@@ -673,26 +983,89 @@ def on_meshtastic_receive(packet, interface, topic=None):
             logger.debug(f"Сообщение от !{normalize_node_id(from_id)}, но цель !{DEST_NODE_ID}. Игнорируем.")
             return
         
-        # ПРИОРИТЕТ: Нормализация и проверка управляющих команд
-        # Сначала нормализуем текст для проверки команд
-        text_normalized = normalize_command_text(text)
+        # ---- ОБРАБОТКА КОМАНД (единый модуль) ----
+        # Распознаём команду
+        command, arg = parse_mesh_command(text)
+        if command in ('start', 'stop'):
+            if command == 'stop':
+                logger.info(f"← Команда от !{normalize_node_id(from_id)}: {text}")
+                if forward_enabled:
+                    forward_enabled = False
+                    send_to_meshtastic("⚠️ Пересылка ОСТАНОВЛЕНА", want_ack=False)
+                else: 
+                    send_to_meshtastic("ℹ️ Пересылка уже остановлена", want_ack=False)
+            elif command == 'start':
+                logger.info(f"← Команда от !{normalize_node_id(from_id)}: {text}")
+                if not forward_enabled:
+                    forward_enabled = True
+                    send_to_meshtastic("✅ Пересылка ВОЗОБНОВЛЕНА", want_ack=False)
+                else: 
+                    send_to_meshtastic("ℹ️ Пересылка уже активна", want_ack=False)
+            return  # Команда обработана, дальше не идём
         
-        if text_normalized in ('!stop', '!стоп'):
-            logger.info(f"← Команда от !{normalize_node_id(from_id)}: {text}")
-            if forward_enabled:
-                forward_enabled = False
-                send_to_meshtastic("⚠️ Пересылка ОСТАНОВЛЕНА", want_ack=False)
-            else: 
-                send_to_meshtastic("ℹ️ Пересылка уже остановлена", want_ack=False)
-            return
-        elif text_normalized in ('!start', '!старт'):
-            logger.info(f"← Команда от !{normalize_node_id(from_id)}: {text}")
-            if not forward_enabled:
-                forward_enabled = True
-                send_to_meshtastic("✅ Пересылка ВОЗОБНОВЛЕНА", want_ack=False)
-            else: 
-                send_to_meshtastic("ℹ️ Пересылка уже активна", want_ack=False)
-            return
+        elif command in ('add', 'list', 'del'):
+            # Команды записной книжки
+            original_user_id = None
+            if reply_id:
+                orig = cache_get_mesh_message(reply_id)
+                if orig:
+                    original_user_id = orig['tg_user_id']
+                else:
+                    logger.debug(f"Команда {command} с reply_id {reply_id}, но сообщение не найдено в кэше")
+            
+            # Запускаем асинхронную обработку
+            if EVENT_LOOP:
+                asyncio.run_coroutine_threadsafe(
+                    handle_contact_command(command, arg, original_user_id, packet_id),
+                    EVENT_LOOP
+                )
+            else:
+                logger.error("EVENT_LOOP не инициализирован, не могу обработать команду контактов")
+            
+            return  # Не отправляем в Telegram
+        
+        # ---- Обработка специальных команд: !<номер> <сообщение> ----
+        # Формат: "!5 Привет" или "! 5 Привет"
+        if text.startswith('!'):
+            # Убираем '!'
+            after_excl = text[1:].lstrip()
+            # Проверяем, что после '!' идёт число (возможно с пробелом)
+            match = re.match(r'^(\d+)\s+(.*)', after_excl)
+            if match:
+                slot = int(match.group(1))
+                message = match.group(2).strip()
+                if not message:
+                    send_to_meshtastic("⚠️ Сообщение после номера не может быть пустым.", want_ack=False)
+                    return
+                # Запускаем асинхронную отправку, передаём packet_id для кэширования
+                if EVENT_LOOP:
+                    asyncio.run_coroutine_threadsafe(
+                        send_to_contact_by_slot(slot, message, packet_id),
+                        EVENT_LOOP
+                    )
+                else:
+                    logger.error("EVENT_LOOP не инициализирован, не могу обработать отправку по слоту")
+                return  # Команда обработана
+        
+        # ---- Обработка специальных команд: @username сообщение ----
+        if text.startswith('@'):
+            # Ищем username: @username пробел
+            match = re.match(r'^@([a-zA-Z0-9_]+)\s+(.*)', text)
+            if match:
+                username = match.group(1)
+                message = match.group(2).strip()
+                if not message:
+                    send_to_meshtastic("⚠️ Сообщение после @username не может быть пустым.", want_ack=False)
+                    return
+                # Запускаем асинхронную отправку, передаём packet_id для кэширования
+                if EVENT_LOOP:
+                    asyncio.run_coroutine_threadsafe(
+                        send_to_contact_by_username(username, message, packet_id),
+                        EVENT_LOOP
+                    )
+                else:
+                    logger.error("EVENT_LOOP не инициализирован, не могу обработать отправку по юзернейму")
+                return  # Команда обработана
         
         # Если пересылка отключена - выходим (команды уже обработаны выше)
         if not forward_enabled: return
@@ -1254,7 +1627,22 @@ async def ack_monitor_loop():
             await asyncio.sleep(5)
 
 async def main():
-    global client, API_ID, API_HASH, PHONE, DEST_NODE_ID, ADMIN_CHAT_ID
+    global client, API_ID, API_HASH, PHONE, DEST_NODE_ID, ADMIN_CHAT_ID, EVENT_LOOP, NO_WELCOME, CONTACT_BOOK_FILE
+    
+    EVENT_LOOP = asyncio.get_running_loop()
+    
+    # Разбор аргументов командной строки
+    args = sys.argv[1:]
+    config_file = None
+    for arg in args:
+        if arg == '--no-welcome':
+            NO_WELCOME = True
+        elif not arg.startswith('--'):
+            config_file = arg
+    
+    if not config_file:
+        print(f"Использование: python {sys.argv[0]} <файл_параметров> [--no-welcome]")
+        sys.exit(1)
     
     if not (ENVIRONMENT_TELEGRAM_FORWARD or ENVIRONMENT_MESH_FORWARD):
         logger.info("Трансляция телеметрии отключена.")
@@ -1272,16 +1660,16 @@ async def main():
     if REPLY_TRACKING_ENABLED:
         logger.info("Отслеживание reply Mesh→TG ВКЛЮЧЕНО.")
     
-    if len(sys.argv) < 2:
-        print(f"Использование: python {sys.argv[0]} <файл_параметров>")
-        sys.exit(1)
-    
     try:
-        API_ID, API_HASH, PHONE, raw_dest_id, ADMIN_CHAT_ID = load_acc_data(sys.argv[1])
+        API_ID, API_HASH, PHONE, raw_dest_id, ADMIN_CHAT_ID = load_acc_data(config_file)
         DEST_NODE_ID = normalize_node_id(raw_dest_id)
         logger.info(f"Конфиг загружен. DEST_NODE_ID: !{DEST_NODE_ID}")
         if ADMIN_CHAT_ID:
             logger.info(f"ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
+        
+        # Устанавливаем имя файла записной книжки на основе DEST_NODE_ID
+        CONTACT_BOOK_FILE = f"contacts_{DEST_NODE_ID}.json"
+        logger.info(f"Файл записной книжки: {CONTACT_BOOK_FILE}")
     except Exception as e:
         logger.error(f"Ошибка конфига: {e}")
         sys.exit(1)
@@ -1300,6 +1688,9 @@ async def main():
     
     me = await client.get_me()
     logger.info(f"Telegram: {me.first_name} ({me.phone})")
+    
+    # Загружаем записную книжку
+    load_contacts()
     
     asyncio.create_task(meshtastic_connection_manager())
     asyncio.create_task(telegram_worker())
