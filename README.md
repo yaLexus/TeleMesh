@@ -203,12 +203,12 @@ SIGNATURE = """
 ## 🚀 Usage / Запуск
 
 ```bash
-python telemesh_v1.4.py my_acc.py
+python telemesh.py my_acc
 ```
-To suppress the welcome message in Mesh:
+To suppress the welcome message in Mesh/ Чтобы отключить приветственное сообщение в Mesh:
 
 ```bash
-python telemesh_1.5.003.py my_acc.py --no-welcome
+python telemesh.py my_acc --no-welcome
 ```
 
 ---
