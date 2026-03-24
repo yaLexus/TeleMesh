@@ -1,4 +1,4 @@
-# telemesh_1.5.006.py
+# telemesh_1.5.007.py
 import sys
 import os
 import asyncio
@@ -25,7 +25,7 @@ import requests
 from urllib.parse import urlparse
 
 # --------------------- Версия ---------------------
-VERSION = "1.5.006"
+VERSION = "1.5.007"
 
 # --------------------- Временные переменные ---------------------
 API_ID = None
@@ -172,24 +172,25 @@ ack_event_queue = queue.Queue()
 
 # Кэш сопоставления: mesh_packet_id -> {tg_user_id, tg_msg_id, timestamp}
 mesh_msg_cache = OrderedDict()
-
-# Обратный кэш: tg_msg_id -> mesh_packet_id
 tg_to_mesh_cache = OrderedDict()
 
 # Записная книжка: {slot: {'id': int, 'name': str, 'username': str}}
 contact_book = {}
 contact_book_lock = Lock()
 
-# Ссылка на event loop для планирования async задач из синхронных коллбэков
+# Чёрный список: {slot: {'id': int, 'name': str, 'username': str}}
+blacklist = {}
+blacklist_lock = Lock()
+
+# Ссылка на event loop
 EVENT_LOOP = None
 
 # Флаг отключения приветственного сообщения в Mesh (из командной строки)
 NO_WELCOME = False
 
-# Путь к файлу записной книжки (будет установлен после загрузки DEST_NODE_ID)
+# Пути к файлам
 CONTACT_BOOK_FILE = None
-
-# Путь к файлу состояния пересылки
+BLACKLIST_FILE = None
 STATE_FILE = None
 
 # --------------------- Логирование ---------------------
@@ -210,7 +211,6 @@ if MESSAGE_SEND_DELAY < 1000:
 
 # --------------------- Функции сохранения/загрузки состояния пересылки ---------------------
 def save_forward_state():
-    """Сохраняет состояние forward_enabled в файл."""
     if STATE_FILE is None:
         return
     try:
@@ -221,7 +221,6 @@ def save_forward_state():
         logger.error(f"Ошибка сохранения состояния пересылки: {e}")
 
 def load_forward_state():
-    """Загружает состояние forward_enabled из файла, если он существует."""
     global forward_enabled
     if STATE_FILE is None or not os.path.exists(STATE_FILE):
         return
@@ -235,39 +234,26 @@ def load_forward_state():
         logger.error(f"Ошибка загрузки состояния пересылки: {e}")
 
 # --------------------- Функции управления кэшем ---------------------
-
 def cache_add_mesh_message(mesh_packet_id, tg_user_id, tg_msg_id):
-    """Добавляет сопоставление mesh_packet_id → {tg_user_id, tg_msg_id} в кэш."""
     if not REPLY_TRACKING_ENABLED:
         return
-    
-    # Удаляем старые записи при превышении лимита
     while len(mesh_msg_cache) >= MSG_CACHE_MAX_SIZE:
         mesh_msg_cache.popitem(last=False)
-    
     mesh_msg_cache[mesh_packet_id] = {
         'tg_user_id': tg_user_id,
         'tg_msg_id': tg_msg_id,
         'timestamp': time.time()
     }
-    
-    # Также добавляем в обратный кэш
     while len(tg_to_mesh_cache) >= MSG_CACHE_MAX_SIZE:
         tg_to_mesh_cache.popitem(last=False)
-    
     tg_to_mesh_cache[tg_msg_id] = mesh_packet_id
-    
     logger.debug(f"Кэш: добавлено Mesh[{mesh_packet_id}] → TG[user={tg_user_id}, msg={tg_msg_id}]")
-    logger.debug(f"Размер кэша: mesh_msg_cache={len(mesh_msg_cache)}, tg_to_mesh_cache={len(tg_to_mesh_cache)}")
 
 def cache_get_mesh_message(mesh_packet_id):
-    """Получает информацию о TG сообщении по mesh_packet_id."""
     if not REPLY_TRACKING_ENABLED:
         return None
-    
     info = mesh_msg_cache.get(mesh_packet_id)
     if info:
-        # Проверяем TTL
         if time.time() - info['timestamp'] > MSG_CACHE_TTL:
             del mesh_msg_cache[mesh_packet_id]
             return None
@@ -275,29 +261,23 @@ def cache_get_mesh_message(mesh_packet_id):
     return None
 
 def cache_get_mesh_id_by_tg(tg_msg_id):
-    """Получает mesh_packet_id по tg_msg_id."""
     if not REACTIONS_ENABLED:
         return None
-    
     mesh_id = tg_to_mesh_cache.get(tg_msg_id)
     if mesh_id:
         logger.debug(f"Найден mesh_packet_id={mesh_id} для tg_msg_id={tg_msg_id}")
         return mesh_id
-    
-    logger.debug(f"tg_msg_id={tg_msg_id} не найден в кэше. Доступные: {list(tg_to_mesh_cache.keys())[-5:]}")
+    logger.debug(f"tg_msg_id={tg_msg_id} не найден в кэше.")
     return None
 
 def cache_cleanup():
-    """Периодическая очистка устаревших записей в кэше."""
     now = time.time()
     expired_mesh = [k for k, v in mesh_msg_cache.items() if now - v['timestamp'] > MSG_CACHE_TTL]
     for k in expired_mesh:
         del mesh_msg_cache[k]
-    
     expired_tg = [k for k, v in tg_to_mesh_cache.items() if v not in mesh_msg_cache]
     for k in expired_tg:
         del tg_to_mesh_cache[k]
-    
     if expired_mesh or expired_tg:
         logger.debug(f"Кэш очищен: {len(expired_mesh)} mesh записей, {len(expired_tg)} tg записей")
 
@@ -313,29 +293,13 @@ CYR_TO_LAT_VISUAL = str.maketrans({
 
 # --------------------- Таблица маппинга реакций TG → Mesh ---------------------
 REACTION_MAPPING = {
-    '👍': 0x1F44D,  # thumbs up
-    '👎': 0x1F44E,  # thumbs down
-    '❤️': 0x2764,   # red heart
-    '💔': 0x1F494,  # broken heart
-    '😂': 0x1F602,  # face with tears of joy
-    '😮': 0x1F62E,  # face with open mouth
-    '😢': 0x1F622,  # crying face
-    '😡': 0x1F621,  # pouting face
-    '🔥': 0x1F525,  # fire
-    '🎉': 0x1F389,  # party popper
-    '👏': 0x1F44F,  # clapping hands
-    '🤔': 0x1F914,  # thinking face
-    '😅': 0x1F605,  # grinning face with sweat
-    '🙏': 0x1F64F,  # folded hands
-    '💯': 0x1F4AF,  # hundred points
-    '⭐': 0x2B50,   # star
-    '❓': 0x2753,   # question mark
-    '✅': 0x2705,   # check mark button
-    '❌': 0x274C,   # cross mark
+    '👍': 0x1F44D, '👎': 0x1F44E, '❤️': 0x2764, '💔': 0x1F494, '😂': 0x1F602,
+    '😮': 0x1F62E, '😢': 0x1F622, '😡': 0x1F621, '🔥': 0x1F525, '🎉': 0x1F389,
+    '👏': 0x1F44F, '🤔': 0x1F914, '😅': 0x1F605, '🙏': 0x1F64F, '💯': 0x1F4AF,
+    '⭐': 0x2B50, '❓': 0x2753, '✅': 0x2705, '❌': 0x274C,
 }
 
 def get_emoji_codepoint(emoji_str):
-    """Получает Unicode codepoint для эмодзи."""
     emoji_clean = emoji_str.replace('\uFE0F', '').replace('\u200D', '')
     if emoji_clean in REACTION_MAPPING:
         return REACTION_MAPPING[emoji_clean]
@@ -344,17 +308,10 @@ def get_emoji_codepoint(emoji_str):
     return None
 
 def clean_emoji_for_telegram(emoji_str):
-    """
-    Очищает emoji от модификаторов тона кожи и вариант-селекторов.
-    Telegram принимает только базовые emoji.
-    """
     if not emoji_str:
         return emoji_str
-    result = emoji_str.replace('\uFE0F', '')
-    result = result.replace('\u200D', '')
-    skin_tone_modifiers = [
-        '\U0001F3FB', '\U0001F3FC', '\U0001F3FD', '\U0001F3FE', '\U0001F3FF'
-    ]
+    result = emoji_str.replace('\uFE0F', '').replace('\u200D', '')
+    skin_tone_modifiers = ['\U0001F3FB', '\U0001F3FC', '\U0001F3FD', '\U0001F3FE', '\U0001F3FF']
     for modifier in skin_tone_modifiers:
         result = result.replace(modifier, '')
     if result:
@@ -395,15 +352,23 @@ def normalize_command_str(text: str) -> str:
     result = text.lower()
     if result.startswith('!'):
         result = '!' + result[1:].lstrip()
+    if result.startswith('#'):
+        result = '#' + result[1:].lstrip()
     for lat, cyr in LAT_TO_CYR_MAP.items():
         result = result.replace(lat, cyr)
     return result
 
+# Команды для записной книжки (префикс !)
 COMMAND_START = {normalize_command_str(cmd) for cmd in ['!start', '!старт', '!cтapт']}
 COMMAND_STOP = {normalize_command_str(cmd) for cmd in ['!stop', '!стоп', '!cтoп']}
 COMMAND_ADD = {normalize_command_str(cmd) for cmd in ['!add', '!добавить', '!дoбaвить']}
 COMMAND_LIST = {normalize_command_str(cmd) for cmd in ['!list', '!список', '!cпиcoк']}
 COMMAND_DEL = {normalize_command_str(cmd) for cmd in ['!del', '!удалить', '!yдaлить']}
+
+# Команды для чёрного списка (префикс #)
+COMMAND_BLACKLIST_ADD = {normalize_command_str(cmd) for cmd in ['#add', '#добавить', '#дoбaвить']}
+COMMAND_BLACKLIST_LIST = {normalize_command_str(cmd) for cmd in ['#list', '#список', '#cпиcoк']}
+COMMAND_BLACKLIST_DEL = {normalize_command_str(cmd) for cmd in ['#del', '#удалить', '#yдaлить']}
 
 COMMAND_MAP = {
     **{cmd: 'start' for cmd in COMMAND_START},
@@ -411,6 +376,9 @@ COMMAND_MAP = {
     **{cmd: 'add' for cmd in COMMAND_ADD},
     **{cmd: 'list' for cmd in COMMAND_LIST},
     **{cmd: 'del' for cmd in COMMAND_DEL},
+    **{cmd: 'blacklist_add' for cmd in COMMAND_BLACKLIST_ADD},
+    **{cmd: 'blacklist_list' for cmd in COMMAND_BLACKLIST_LIST},
+    **{cmd: 'blacklist_del' for cmd in COMMAND_BLACKLIST_DEL},
 }
 
 def parse_mesh_command(text: str):
@@ -434,7 +402,6 @@ def parse_mesh_command(text: str):
 def load_contacts():
     global contact_book
     if CONTACT_BOOK_FILE is None:
-        logger.warning("CONTACT_BOOK_FILE не установлен, пропускаем загрузку.")
         return
     file_path = os.path.join(ACC_BD_PATH, CONTACT_BOOK_FILE)
     try:
@@ -445,7 +412,6 @@ def load_contacts():
                 logger.info(f"Записная книжка загружена из {file_path} ({len(contact_book)} записей)")
         else:
             contact_book = {}
-            logger.info(f"Файл записной книжки {file_path} не найден. Создана пустая.")
     except Exception as e:
         logger.error(f"Ошибка загрузки записной книжки: {e}")
         contact_book = {}
@@ -461,51 +427,59 @@ def save_contacts():
     except Exception as e:
         logger.error(f"Ошибка сохранения записной книжки: {e}")
 
-def get_next_free_slot():
-    if not contact_book:
+def get_next_free_slot(book):
+    if not book:
         return 1
-    slots = sorted(contact_book.keys())
+    slots = sorted(book.keys())
     for i in range(1, len(slots) + 2):
         if i not in slots:
             return i
     return len(slots) + 1
 
-def add_contact(tg_user_id, name, username, slot=None):
-    with contact_book_lock:
+def add_contact(book, book_lock, tg_user_id, name, username, slot=None):
+    with book_lock:
         if slot is None:
-            slot = get_next_free_slot()
-        contact_book[slot] = {'id': tg_user_id, 'name': name, 'username': username}
-        save_contacts()
+            slot = get_next_free_slot(book)
+        book[slot] = {'id': tg_user_id, 'name': name, 'username': username}
+        if book is contact_book:
+            save_contacts()
+        else:
+            save_blacklist()
         return slot
 
-def delete_contact_by_user_id(tg_user_id):
-    with contact_book_lock:
-        for slot, info in list(contact_book.items()):
+def delete_contact_by_user_id(book, book_lock, tg_user_id):
+    with book_lock:
+        for slot, info in list(book.items()):
             if info.get('id') == tg_user_id:
-                del contact_book[slot]
-                save_contacts()
+                del book[slot]
+                if book is contact_book:
+                    save_contacts()
+                else:
+                    save_blacklist()
                 return slot
         return None
 
-def delete_contact_by_slot(slot):
-    with contact_book_lock:
-        if slot in contact_book:
-            del contact_book[slot]
-            save_contacts()
+def delete_contact_by_slot(book, book_lock, slot):
+    with book_lock:
+        if slot in book:
+            del book[slot]
+            if book is contact_book:
+                save_contacts()
+            else:
+                save_blacklist()
             return True
         return False
 
-def get_contact_by_slot(slot):
-    with contact_book_lock:
-        return contact_book.get(slot)
+def get_contact_by_slot(book, slot):
+    return book.get(slot)
 
-def format_contact_list():
-    with contact_book_lock:
-        if not contact_book:
-            return "📒 Записная книжка пуста."
-        lines = ["📒 Записная книжка:"]
-        for slot in sorted(contact_book.keys()):
-            info = contact_book[slot]
+def format_list(book, title):
+    with contact_book_lock if book is contact_book else blacklist_lock:
+        if not book:
+            return f"{title} пуст."
+        lines = [f"{title}:"]
+        for slot in sorted(book.keys()):
+            info = book[slot]
             name = info.get('name', 'Неизвестно')
             username = info.get('username', '')
             if username:
@@ -514,9 +488,135 @@ def format_contact_list():
                 lines.append(f"{slot}: {name}")
         return "\n".join(lines)
 
+# --------------------- Чёрный список ---------------------
+def load_blacklist():
+    global blacklist
+    if BLACKLIST_FILE is None:
+        return
+    file_path = os.path.join(ACC_BD_PATH, BLACKLIST_FILE)
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                blacklist = {int(k): v for k, v in data.items()}
+                logger.info(f"Чёрный список загружен из {file_path} ({len(blacklist)} записей)")
+        else:
+            blacklist = {}
+    except Exception as e:
+        logger.error(f"Ошибка загрузки чёрного списка: {e}")
+        blacklist = {}
+
+def save_blacklist():
+    if BLACKLIST_FILE is None:
+        return
+    file_path = os.path.join(ACC_BD_PATH, BLACKLIST_FILE)
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(blacklist, f, ensure_ascii=False, indent=2)
+        logger.debug(f"Чёрный список сохранён в {file_path}")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения чёрного списка: {e}")
+
+def is_user_blacklisted(tg_user_id):
+    with blacklist_lock:
+        for info in blacklist.values():
+            if info.get('id') == tg_user_id:
+                return True
+        return False
+
+# --------------------- Обработчики команд для чёрного списка ---------------------
+async def handle_blacklist_command(command, arg, original_user_id, packet_id):
+    try:
+        if command == 'blacklist_add':
+            if original_user_id is None:
+                response = "⚠️ Команда #add должна быть ответом на сообщение из Telegram."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            try:
+                user = await client.get_entity(original_user_id)
+                name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username or str(user.id)
+                username = user.username or ""
+            except Exception as e:
+                logger.error(f"Не удалось получить информацию о пользователе {original_user_id}: {e}")
+                response = f"⚠️ Не удалось получить данные пользователя (ID: {original_user_id})."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            slot = add_contact(blacklist, blacklist_lock, original_user_id, name, username, arg)
+            response = f"⛔ Пользователь {name} (@{username}) добавлен в чёрный список под номером {slot}."
+            send_to_meshtastic(response, want_ack=False)
+        elif command == 'blacklist_del':
+            if arg is not None:
+                if delete_contact_by_slot(blacklist, blacklist_lock, arg):
+                    response = f"🗑 Запись №{arg} удалена из чёрного списка."
+                else:
+                    response = f"⚠️ Запись №{arg} не найдена."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            if original_user_id is None:
+                response = "⚠️ Команда #del должна быть ответом на сообщение из Telegram или содержать номер записи."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            slot = delete_contact_by_user_id(blacklist, blacklist_lock, original_user_id)
+            if slot is not None:
+                response = f"🗑 Пользователь удалён из чёрного списка (слот {slot})."
+            else:
+                response = "⚠️ Пользователь не найден в чёрном списке."
+            send_to_meshtastic(response, want_ack=False)
+        elif command == 'blacklist_list':
+            response = format_list(blacklist, "⛔ Чёрный список")
+            send_to_meshtastic(response, want_ack=False)
+    except Exception as e:
+        logger.error(f"Ошибка обработки команды {command}: {e}", exc_info=True)
+        send_to_meshtastic(f"⚠️ Ошибка при обработке команды: {e}", want_ack=False)
+
+# --------------------- Обработчик команд записной книжки ---------------------
+async def handle_contact_command(command, arg, original_user_id, packet_id):
+    try:
+        if command == 'add':
+            if original_user_id is None:
+                response = "⚠️ Команда !add должна быть ответом на сообщение из Telegram."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            try:
+                user = await client.get_entity(original_user_id)
+                name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username or str(user.id)
+                username = user.username or ""
+            except Exception as e:
+                logger.error(f"Не удалось получить информацию о пользователе {original_user_id}: {e}")
+                response = f"⚠️ Не удалось получить данные пользователя (ID: {original_user_id})."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            slot = add_contact(contact_book, contact_book_lock, original_user_id, name, username, arg)
+            response = f"✅ Пользователь {name} (@{username}) добавлен в записную книжку под номером {slot}."
+            send_to_meshtastic(response, want_ack=False)
+        elif command == 'del':
+            if arg is not None:
+                if delete_contact_by_slot(contact_book, contact_book_lock, arg):
+                    response = f"🗑 Запись №{arg} удалена из записной книжки."
+                else:
+                    response = f"⚠️ Запись №{arg} не найдена."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            if original_user_id is None:
+                response = "⚠️ Команда !del должна быть ответом на сообщение из Telegram или содержать номер записи."
+                send_to_meshtastic(response, want_ack=False)
+                return
+            slot = delete_contact_by_user_id(contact_book, contact_book_lock, original_user_id)
+            if slot is not None:
+                response = f"🗑 Пользователь удалён из записной книжки (слот {slot})."
+            else:
+                response = "⚠️ Пользователь не найден в записной книжке."
+            send_to_meshtastic(response, want_ack=False)
+        elif command == 'list':
+            response = format_list(contact_book, "📒 Записная книжка")
+            send_to_meshtastic(response, want_ack=False)
+    except Exception as e:
+        logger.error(f"Ошибка обработки команды {command}: {e}", exc_info=True)
+        send_to_meshtastic(f"⚠️ Ошибка при обработке команды: {e}", want_ack=False)
+
 # --------------------- Отправка в Telegram по слоту/юзернейму ---------------------
 async def send_to_contact_by_slot(slot: int, message: str, mesh_packet_id: int = None):
-    contact = get_contact_by_slot(slot)
+    contact = get_contact_by_slot(contact_book, slot)
     if not contact:
         response = f"⚠️ Контакт с номером {slot} не найден в записной книжке."
         send_to_meshtastic(response, want_ack=False)
@@ -565,51 +665,6 @@ async def send_to_contact_by_username(username: str, message: str, mesh_packet_i
     logger.info(f"→ Сообщение добавлено в очередь для пользователя @{username} (TG ID: {target_user_id}, mesh_packet_id={mesh_packet_id})")
     response = f"✅ Сообщение отправлено пользователю @{username}"
     send_to_meshtastic(response, want_ack=False)
-
-# --------------------- Асинхронная обработка команд записной книжки ---------------------
-async def handle_contact_command(command, arg, original_user_id, packet_id):
-    try:
-        if command == 'add':
-            if original_user_id is None:
-                response = "⚠️ Команда !add должна быть ответом на сообщение из Telegram."
-                send_to_meshtastic(response, want_ack=False)
-                return
-            try:
-                user = await client.get_entity(original_user_id)
-                name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username or str(user.id)
-                username = user.username or ""
-            except Exception as e:
-                logger.error(f"Не удалось получить информацию о пользователе {original_user_id}: {e}")
-                response = f"⚠️ Не удалось получить данные пользователя (ID: {original_user_id})."
-                send_to_meshtastic(response, want_ack=False)
-                return
-            slot = add_contact(original_user_id, name, username, arg)
-            response = f"✅ Пользователь {name} (@{username}) добавлен в записную книжку под номером {slot}."
-            send_to_meshtastic(response, want_ack=False)
-        elif command == 'del':
-            if arg is not None:
-                if delete_contact_by_slot(arg):
-                    response = f"🗑 Запись №{arg} удалена из записной книжки."
-                else:
-                    response = f"⚠️ Запись №{arg} не найдена."
-                send_to_meshtastic(response, want_ack=False)
-                return
-            if original_user_id is None:
-                response = "⚠️ Команда !del должна быть ответом на сообщение из Telegram или содержать номер записи."
-                send_to_meshtastic(response, want_ack=False)
-                return
-            slot = delete_contact_by_user_id(original_user_id)
-            if slot is not None:
-                response = f"🗑 Пользователь удалён из записной книжки (слот {slot})."
-            else:
-                response = "⚠️ Пользователь не найден в записной книжке."
-            send_to_meshtastic(response, want_ack=False)
-        elif command == 'list':
-            response = format_contact_list()
-            send_to_meshtastic(response, want_ack=False)
-    except Exception as e:
-        logger.error(f"Ошибка обработки команды {command}: {e}", exc_info=True)
-        send_to_meshtastic(f"⚠️ Ошибка при обработке команды: {e}", want_ack=False)
 
 # --------------------- Загрузка параметров ---------------------
 def load_acc_data(config_file):
@@ -673,7 +728,6 @@ def format_message_with_signature(message: str) -> str:
     return f"{message}\n{SIGNATURE}" if SIGNATURE else message
 
 # --------------------- Meshtastic ---------------------
-
 def on_meshtastic_connect(interface, topic=None):
     global MY_NODE_ID
     try:
@@ -693,28 +747,16 @@ def on_meshtastic_connect(interface, topic=None):
             logger.info("Meshtastic подключён → %s", my_info)
         else:
             logger.info(f"Meshtastic подключён. ID: !{MY_NODE_ID}, Name: {long_name} ({short_name})")
-        active_options = []
-        if forward_enabled: active_options.append("FORWARD_ENABLED")
-        if FAIL_MSG: active_options.append("FAIL_MSG")
-        if ENVIRONMENT_TELEGRAM_FORWARD: active_options.append("ENVIRONMENT_TELEGRAM_FORWARD")
-        if ENVIRONMENT_MESH_FORWARD: active_options.append("ENVIRONMENT_MESH_FORWARD")
-        if TRANSLIT_ENABLED: active_options.append("TRANSLIT_ENABLED")
-        if REACTIONS_ENABLED: active_options.append("REACTIONS_ENABLED")
-        if REPLY_TRACKING_ENABLED: active_options.append("REPLY_TRACKING_ENABLED")
-        if DEBUG: active_options.append("DEBUG")
+        # Формируем приветственное сообщение в Mesh
         msg_lines = [f"📟 TeleMesh v{VERSION}", f"Node: {long_name} ({short_name})"]
-        if active_options:
-            msg_lines.append("\n".join(active_options))
-        welcome_msg = "\n".join(msg_lines)
         if not NO_WELCOME:
-            send_to_meshtastic(welcome_msg, want_ack=False)
+            send_to_meshtastic("\n".join(msg_lines), want_ack=False)
+        # Отправляем в Telegram Admin
         if ADMIN_CHAT_ID:
             status_lines = [
                 f"📟 TeleMesh v{VERSION} запущен",
                 f"Node: {long_name} ({short_name})",
                 f"Target ID: !{DEST_NODE_ID}",
-                f"\nEnabled options:",
-                "\n".join(active_options)
             ]
             tg_status = "\n".join(status_lines)
             telegram_queue.put({'user_id': ADMIN_CHAT_ID, 'message': tg_status})
@@ -773,9 +815,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                         if ENVIRONMENT_MESH_FORWARD:
                             send_to_meshtastic(env_msg, want_ack=False)
                             logger.info(f"→ Телеметрия отправлена в Mesh на !{DEST_NODE_ID}.")
-                    else:
-                        if DEBUG:
-                            logger.debug("Телеметрия environment_metrics пуста (нет нужных полей).")
                 elif telemetry and 'device_metrics' in telemetry:
                     if DEBUG:
                         logger.debug("Получена device_metrics (батарея), игнорируем.")
@@ -820,10 +859,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                                 'msg_id': original_msg_info['tg_msg_id'],
                                 'reaction_emoji': emoji_char
                             })
-                            if DEBUG:
-                                logger.debug(f"→ Реакция {emoji_char} добавлена в очередь для TG пользователю {original_msg_info['tg_user_id']}")
-                        else:
-                            logger.debug(f"Реакция на сообщение {reply_id}, но оно не найдено в кэше")
                     return
             except Exception as e:
                 logger.warning(f"Не удалось декодировать emoji: {e}")
@@ -860,15 +895,23 @@ def on_meshtastic_receive(packet, interface, topic=None):
                 orig = cache_get_mesh_message(reply_id)
                 if orig:
                     original_user_id = orig['tg_user_id']
-                else:
-                    logger.debug(f"Команда {command} с reply_id {reply_id}, но сообщение не найдено в кэше")
             if EVENT_LOOP:
                 asyncio.run_coroutine_threadsafe(
                     handle_contact_command(command, arg, original_user_id, packet_id),
                     EVENT_LOOP
                 )
-            else:
-                logger.error("EVENT_LOOP не инициализирован, не могу обработать команду контактов")
+            return
+        elif command in ('blacklist_add', 'blacklist_list', 'blacklist_del'):
+            original_user_id = None
+            if reply_id:
+                orig = cache_get_mesh_message(reply_id)
+                if orig:
+                    original_user_id = orig['tg_user_id']
+            if EVENT_LOOP:
+                asyncio.run_coroutine_threadsafe(
+                    handle_blacklist_command(command, arg, original_user_id, packet_id),
+                    EVENT_LOOP
+                )
             return
         # Отправка по слоту
         if text.startswith('!'):
@@ -885,8 +928,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                         send_to_contact_by_slot(slot, message, packet_id),
                         EVENT_LOOP
                     )
-                else:
-                    logger.error("EVENT_LOOP не инициализирован, не могу обработать отправку по слоту")
                 return
         # Отправка по @username
         if text.startswith('@'):
@@ -902,8 +943,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                         send_to_contact_by_username(username, message, packet_id),
                         EVENT_LOOP
                     )
-                else:
-                    logger.error("EVENT_LOOP не инициализирован, не могу обработать отправку по юзернейму")
                 return
         # Если пересылка отключена - выходим
         if not forward_enabled:
@@ -920,7 +959,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                 })
                 logger.info(f"→ Ответ отправлен в TG пользователю {original_msg_info['tg_user_id']} как reply на msg {original_msg_info['tg_msg_id']}")
             else:
-                logger.debug(f"Reply на сообщение {reply_id}, но оно не найдено в кэше. Отправка last_sender.")
                 if last_sender is not None:
                     telegram_queue.put({
                         'user_id': last_sender,
@@ -974,10 +1012,7 @@ def send_to_meshtastic(text: str, want_ack=True, user_id=None, msg_id=None, repl
         log_text = text[:30] + "..." if len(text) > 30 else text
         logger.info(f"→ Meshtastic TX (ID: {packet_id}, To: !{DEST_NODE_ID}, ACK: {want_ack}, ReplyTo: {reply_id}): {log_text}")
         if packet_id is not None and user_id is not None and msg_id is not None:
-            logger.debug(f"Сохраняем в кэш: packet_id={packet_id}, user_id={user_id}, msg_id={msg_id}")
             cache_add_mesh_message(packet_id, user_id, msg_id)
-        else:
-            logger.debug(f"НЕ сохраняем в кэш: packet_id={packet_id}, user_id={user_id}, msg_id={msg_id}")
         return packet_id
     except Exception as e:
         logger.error(f"Ошибка TX (возможно потеря связи): {e}")
@@ -1094,8 +1129,11 @@ async def handle_new_message(event):
     if sender.bot or sender.id == (await client.get_me()).id:
         return
     last_sender = sender.id
+    # Проверяем чёрный список
+    if is_user_blacklisted(sender.id):
+        logger.info(f"Сообщение от заблокированного пользователя {sender.id} игнорировано.")
+        return
     if not forward_enabled:
-        # Игнорируем сообщения, когда пересылка отключена
         return
     text = event.message.message.strip() if event.message.message else ""
     prefix = f"{sender.first_name or ''} {sender.last_name or ''}".strip() + ": "
@@ -1165,19 +1203,12 @@ async def handle_reaction(event):
         if DEBUG:
             logger.debug(f"← TG Reaction: msg_id={message_id}, peer={peer_id}")
         if peer_id and not isinstance(peer_id, PeerUser):
-            if DEBUG:
-                logger.debug(f"Реакция не в личном чате, пропускаем")
             return
         mesh_packet_id = cache_get_mesh_id_by_tg(message_id)
         if mesh_packet_id is None:
-            if DEBUG:
-                logger.debug(f"Реакция на сообщение {message_id}, но оно не найдено в кэше Mesh")
-                logger.debug(f"Текущий кэш tg_to_mesh_cache: {list(tg_to_mesh_cache.keys())}")
             return
         reactions_list = getattr(reactions_obj, 'results', None) if reactions_obj else None
         if not reactions_list:
-            if DEBUG:
-                logger.debug("Список реакций пуст")
             return
         for reaction_count in reactions_list:
             try:
@@ -1191,8 +1222,6 @@ async def handle_reaction(event):
                     emoji = reaction_obj.emoticon
                 elif isinstance(reaction_obj, str):
                     emoji = reaction_obj
-                if DEBUG:
-                    logger.debug(f"Извлечён emoji: {emoji}")
                 if emoji:
                     clean_emoji_mesh = clean_emoji_for_telegram(emoji)
                     emoji_codepoint = get_emoji_codepoint(clean_emoji_mesh)
@@ -1201,8 +1230,6 @@ async def handle_reaction(event):
                         success = send_reaction_to_meshtastic(mesh_packet_id, emoji_codepoint, clean_emoji_mesh)
                         if success:
                             logger.info(f"→ Реакция {clean_emoji_mesh} отправлена в Mesh на пакет {mesh_packet_id}")
-                        else:
-                            logger.warning(f"Не удалось отправить реакцию {clean_emoji_mesh} в Mesh")
             except Exception as re:
                 logger.debug(f"Ошибка обработки отдельной реакции: {re}")
     except Exception as e:
@@ -1348,7 +1375,7 @@ async def ack_monitor_loop():
             await asyncio.sleep(5)
 
 async def main():
-    global client, API_ID, API_HASH, PHONE, DEST_NODE_ID, ADMIN_CHAT_ID, EVENT_LOOP, NO_WELCOME, CONTACT_BOOK_FILE, STATE_FILE, forward_enabled
+    global client, API_ID, API_HASH, PHONE, DEST_NODE_ID, ADMIN_CHAT_ID, EVENT_LOOP, NO_WELCOME, CONTACT_BOOK_FILE, BLACKLIST_FILE, STATE_FILE, forward_enabled
     EVENT_LOOP = asyncio.get_running_loop()
     args = sys.argv[1:]
     config_file = None
@@ -1379,26 +1406,28 @@ async def main():
         if ADMIN_CHAT_ID:
             logger.info(f"ADMIN_CHAT_ID: {ADMIN_CHAT_ID}")
         CONTACT_BOOK_FILE = f"contacts_{DEST_NODE_ID}.json"
-        logger.info(f"Файл записной книжки: {CONTACT_BOOK_FILE}")
+        BLACKLIST_FILE = f"blacklist_{DEST_NODE_ID}.json"
         STATE_FILE = os.path.join(ACC_BD_PATH, f"forward_state_{DEST_NODE_ID}.json")
+        logger.info(f"Файл записной книжки: {CONTACT_BOOK_FILE}")
+        logger.info(f"Файл чёрного списка: {BLACKLIST_FILE}")
         load_forward_state()
     except Exception as e:
         logger.error(f"Ошибка конфига: {e}")
         sys.exit(1)
-    # Вывод в лог версии и активных опций
-    active_options = []
-    if forward_enabled: active_options.append("FORWARD_ENABLED")
-    if FAIL_MSG: active_options.append("FAIL_MSG")
-    if ENVIRONMENT_TELEGRAM_FORWARD: active_options.append("ENVIRONMENT_TELEGRAM_FORWARD")
-    if ENVIRONMENT_MESH_FORWARD: active_options.append("ENVIRONMENT_MESH_FORWARD")
-    if TRANSLIT_ENABLED: active_options.append("TRANSLIT_ENABLED")
-    if REACTIONS_ENABLED: active_options.append("REACTIONS_ENABLED")
-    if REPLY_TRACKING_ENABLED: active_options.append("REPLY_TRACKING_ENABLED")
-    if DEBUG: active_options.append("DEBUG")
+    # Вывод версии и активных опций в лог (человеко-читаемо)
+    active_options_desc = []
+    if forward_enabled: active_options_desc.append("FORWARD_ENABLED (Пересылка)")
+    if FAIL_MSG: active_options_desc.append("FAIL_MSG (Уведомления о недоставке)")
+    if ENVIRONMENT_TELEGRAM_FORWARD: active_options_desc.append("ENVIRONMENT_TELEGRAM_FORWARD (Телеметрия в Telegram)")
+    if ENVIRONMENT_MESH_FORWARD: active_options_desc.append("ENVIRONMENT_MESH_FORWARD (Телеметрия в Mesh)")
+    if TRANSLIT_ENABLED: active_options_desc.append("TRANSLIT_ENABLED (Транслитерация)")
+    if REACTIONS_ENABLED: active_options_desc.append("REACTIONS_ENABLED (Реакции)")
+    if REPLY_TRACKING_ENABLED: active_options_desc.append("REPLY_TRACKING_ENABLED (Отслеживание ответов)")
+    if DEBUG: active_options_desc.append("DEBUG (Отладка)")
     logger.info(f"TeleMesh v{VERSION} запущен")
     logger.info(f"Target ID: !{DEST_NODE_ID}")
-    if active_options:
-        logger.info(f"Активные опции: {', '.join(active_options)}")
+    if active_options_desc:
+        logger.info(f"Активные опции: {', '.join(active_options_desc)}")
     client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
     client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
     if REACTIONS_ENABLED:
@@ -1410,6 +1439,7 @@ async def main():
     me = await client.get_me()
     logger.info(f"Telegram: {me.first_name} ({me.phone})")
     load_contacts()
+    load_blacklist()
     asyncio.create_task(meshtastic_connection_manager())
     asyncio.create_task(telegram_worker())
     asyncio.create_task(ack_monitor_loop())
