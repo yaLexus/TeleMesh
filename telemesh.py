@@ -1,4 +1,3 @@
-# telemesh_1.5.007.py
 import sys
 import os
 import asyncio
@@ -25,7 +24,7 @@ import requests
 from urllib.parse import urlparse
 
 # --------------------- Версия ---------------------
-VERSION = "1.5.007"
+VERSION = "1.5.009"
 
 # --------------------- Временные переменные ---------------------
 API_ID = None
@@ -156,6 +155,21 @@ try:
 except ImportError:
     MSG_CACHE_MAX_SIZE = 1000
 
+# --------------------- ПРОКСИ И ПРИВЯЗКА К ИНТЕРФЕЙСУ ---------------------
+try:
+    from config import TG_PROXY_TYPE, TG_PROXY_HOST, TG_PROXY_PORT, TG_PROXY_USERNAME, TG_PROXY_PASSWORD
+except ImportError:
+    TG_PROXY_TYPE = None
+    TG_PROXY_HOST = None
+    TG_PROXY_PORT = None
+    TG_PROXY_USERNAME = None
+    TG_PROXY_PASSWORD = None
+
+try:
+    from config import TG_INTERFACE
+except ImportError:
+    TG_INTERFACE = None
+
 # --------------------- Глобальные переменные ---------------------
 last_sender = None
 forward_enabled = FORWARD_ENABLED
@@ -208,6 +222,52 @@ if DEBUG:
 if MESSAGE_SEND_DELAY < 1000:
     logger.warning(f"MESSAGE_SEND_DELAY ({MESSAGE_SEND_DELAY}ms) слишком мал. Установлено минимальное значение 1000ms.")
     MESSAGE_SEND_DELAY = 1000
+
+# --------------------- КАСТОМНЫЙ КЛАСС СОЕДИНЕНИЯ ДЛЯ ПРИВЯЗКИ К ИНТЕРФЕЙСУ ---------------------
+import socket
+import asyncio
+from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
+
+class BindToInterfaceConnection(ConnectionTcpAbridged):
+    """Соединение Telethon с привязкой сокета к интерфейсу через SO_BINDTODEVICE."""
+    def __init__(self, *args, interface_name=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.interface_name = interface_name
+
+    async def _connect(self, address, timeout=None, ssl=None):
+        family = socket.AF_INET
+        if ':' in address[0]:
+            family = socket.AF_INET6
+
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+
+        if self.interface_name:
+            try:
+                # SO_BINDTODEVICE = 25
+                sock.setsockopt(socket.SOL_SOCKET, 25, self.interface_name.encode())
+                logger.debug(f"Привязка сокета к интерфейсу {self.interface_name}")
+            except Exception as e:
+                logger.error(f"Не удалось установить SO_BINDTODEVICE: {e} (требуются права root)")
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.sock_connect(sock, address)
+        except Exception:
+            sock.close()
+            raise
+
+        sock.setblocking(False)
+        self._socket = sock
+
+        if ssl:
+            try:
+                self._socket = await loop.start_tls(self._socket, address, ssl=ssl, server_side=False)
+            except Exception:
+                self._socket.close()
+                raise
+
+        self._connected = True
 
 # --------------------- Функции сохранения/загрузки состояния пересылки ---------------------
 def save_forward_state():
@@ -1414,7 +1474,7 @@ async def main():
     except Exception as e:
         logger.error(f"Ошибка конфига: {e}")
         sys.exit(1)
-    # Вывод версии и активных опций в лог (человеко-читаемо)
+    # Вывод версии и активных опций в лог
     active_options_desc = []
     if forward_enabled: active_options_desc.append("FORWARD_ENABLED (Пересылка)")
     if FAIL_MSG: active_options_desc.append("FAIL_MSG (Уведомления о недоставке)")
@@ -1428,21 +1488,59 @@ async def main():
     logger.info(f"Target ID: !{DEST_NODE_ID}")
     if active_options_desc:
         logger.info(f"Активные опции: {', '.join(active_options_desc)}")
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+
+    # --------------------- НАСТРОЙКА TELEGRAM С ПРОКСИ И ПРИВЯЗКОЙ К ИНТЕРФЕЙСУ ---------------------
+    # Прокси
+    proxy_params = None
+    if TG_PROXY_TYPE and TG_PROXY_HOST and TG_PROXY_PORT:
+        import socks
+        proxy_type_map = {
+            'socks5': socks.SOCKS5,
+            'socks4': socks.SOCKS4,
+            'http': socks.HTTP,
+        }
+        ptype = proxy_type_map.get(TG_PROXY_TYPE.lower())
+        if ptype:
+            proxy_params = (ptype, TG_PROXY_HOST, TG_PROXY_PORT, TG_PROXY_USERNAME, TG_PROXY_PASSWORD)
+            logger.info(f"Telegram прокси настроен: {TG_PROXY_TYPE}://{TG_PROXY_HOST}:{TG_PROXY_PORT}")
+        else:
+            logger.warning(f"Неподдерживаемый тип прокси: {TG_PROXY_TYPE}")
+
+    # Выбор класса соединения (с привязкой к интерфейсу или стандартный)
+    if TG_INTERFACE:
+        conn_class = BindToInterfaceConnection
+        conn_params = {'interface_name': TG_INTERFACE}
+        logger.info(f"Telegram будет использовать интерфейс {TG_INTERFACE} (полная привязка SO_BINDTODEVICE)")
+    else:
+        from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
+        conn_class = ConnectionTcpAbridged
+        conn_params = {}
+
+    client = TelegramClient(
+        SESSION_NAME, API_ID, API_HASH,
+        proxy=proxy_params,
+        connection=conn_class,
+        connection_params=conn_params
+    )
+
     client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
     if REACTIONS_ENABLED:
         @client.on(events.Raw)
         async def raw_event_handler(event):
             if isinstance(event, UpdateMessageReactions):
                 await handle_reaction(event)
+
     await client.start(phone=PHONE)
     me = await client.get_me()
     logger.info(f"Telegram: {me.first_name} ({me.phone})")
+
     load_contacts()
     load_blacklist()
+
     asyncio.create_task(meshtastic_connection_manager())
     asyncio.create_task(telegram_worker())
     asyncio.create_task(ack_monitor_loop())
+
     await client.run_until_disconnected()
 
 if __name__ == "__main__":

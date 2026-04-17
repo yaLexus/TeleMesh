@@ -10,7 +10,7 @@
 # 1. Через USB. Проверь ls /dev/tty* до и после подключения
 #SERIAL_PORT = "/dev/ttyUSB0"
 # 2. Через TCP (если Meshtastic MQTT или native TCP)
-TCP_HOST = "192.168.1.10"
+TCP_HOST = "10.1.11.100"
 TCP_PORT = 4403
 
 # === ПАРАМЕТРЫ ФОРМАТИРОВАНИЯ СООБЩЕНИЙ ===
@@ -26,7 +26,7 @@ TCP_PORT = 4403
 # Задержка между отправкой отдельных частей сообщения в миллисекундах
 #MESSAGE_SEND_DELAY = 3000   # [3000]
 # Путь к папке с конфигами аккаунтов ТГ
-#ACC_BD_PATH = "tg_accounts" # ["."]
+ACC_BD_PATH = "accounts" # ["."]
 
 # Разрешить отправлять ответы в ТГ
 #FORWARD_ENABLED = True
@@ -46,7 +46,7 @@ FAIL_MSG = "❌ Не удалось доставить сообщение в м�
 # Отправлять данные о погоде в Telegram (в админ-канал)
 #ENVIRONMENT_TELEGRAM_FORWARD = False # [False]
 # Отправлять данные о погоде в Mesh (целевой ноде)
-#ENVIRONMENT_MESH_FORWARD = True # [False]
+ENVIRONMENT_MESH_FORWARD = True # [False]
 
 # Включить поддержку реакций TG → Mesh
 #REACTIONS_ENABLED = True
@@ -71,8 +71,7 @@ FAIL_MSG = "❌ Не удалось доставить сообщение в м�
 #TG_PROXY_USERNAME = None  # опционально
 #TG_PROXY_PASSWORD = None  # опционально
 
-# Локальный IP-адрес (или имя интерфейса) для привязки сокетов Telegram.
-# Укажите IP, который принадлежит нужному интерфейсу (например '192.168.1.100').
-# Оставьте None для автоматического выбора.
-#TG_LOCAL_ADDRESS = None  # '192.168.1.100'
+# === ПОЛНАЯ ПРИВЯЗКА TELEGRAM К СЕТЕВОМУ ИНТЕРФЕЙСУ ===
+# Имя интерфейса (например, 'eth0', 'wlan0'). Только Linux, требуются права root.
+#TG_INTERFACE = None  # 'eth0'
 
