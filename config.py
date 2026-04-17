@@ -75,7 +75,7 @@ FAIL_MSG = "❌ Не удалось доставить сообщение в м�
 #       'port': 443,
 #       'secret': 'ddxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'   # 32-байтный secret
 #   }
-try:
-    from config import TELEGRAM_PROXY
-except ImportError:
-    TELEGRAM_PROXY = None
+#TELEGRAM_PROXY = None
+
+#TELEGRAM_BIND_INTERFACE = "wg0"
+

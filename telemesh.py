@@ -23,6 +23,7 @@ from pubsub import pub
 import re
 import requests
 from urllib.parse import urlparse
+import socket
 
 # --------------------- Версия ---------------------
 VERSION = "1.5.009"
@@ -161,6 +162,12 @@ try:
     from config import TELEGRAM_PROXY
 except ImportError:
     TELEGRAM_PROXY = None
+
+# --------------------- Telegram: привязка к интерфейсу (awg0, wg0 и т.д.) ---------------------
+try:
+    from config import TELEGRAM_BIND_INTERFACE
+except ImportError:
+    TELEGRAM_BIND_INTERFACE = None
 
 # --------------------- Глобальные переменные ---------------------
 last_sender = None
@@ -1434,19 +1441,39 @@ async def main():
     logger.info(f"Target ID: !{DEST_NODE_ID}")
     if active_options_desc:
         logger.info(f"Активные опции: {', '.join(active_options_desc)}")
-    # ====================== TELEGRAM PROXY ======================
-    if TELEGRAM_PROXY:
-        logger.info(f"✅ Telegram: подключение через прокси/шлюз {TELEGRAM_PROXY}")
+    # ====================== TELEGRAM BIND INTERFACE ======================
+    if TELEGRAM_BIND_INTERFACE:
+        logger.info(f"🔗 Telegram: привязка к интерфейсу {TELEGRAM_BIND_INTERFACE} (SO_BINDTODEVICE)")
+        try:
+            original_socket = socket.socket
+
+            def bound_socket(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
+                sock = original_socket(family, type, proto)
+                try:
+                    # Привязываем сокет к указанному интерфейсу
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
+                                    TELEGRAM_BIND_INTERFACE.encode('utf-8'))
+                    logger.debug(f"Socket успешно привязан к интерфейсу {TELEGRAM_BIND_INTERFACE}")
+                except PermissionError:
+                    logger.warning(f"⚠️ Не удалось привязать к {TELEGRAM_BIND_INTERFACE} — запусти скрипт от root или дай CAP_NET_RAW")
+                except Exception as e:
+                    logger.warning(f"Ошибка привязки к интерфейсу {TELEGRAM_BIND_INTERFACE}: {e}")
+                return sock
+
+            # Заменяем socket.socket на нашу версию
+            socket.socket = bound_socket
+        except Exception as e:
+            logger.error(f"Не удалось настроить привязку к интерфейсу: {e}")
     else:
-        logger.info("✅ Telegram: прямое подключение (без прокси)")
-    # ===========================================================
+        logger.info("✅ Telegram: прямое подключение (без привязки к интерфейсу)")
+    # =====================================================================
 
     client = TelegramClient(
         SESSION_NAME,
         API_ID,
         API_HASH,
-        proxy=TELEGRAM_PROXY   # ← вот главный параметр
-    )    client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
+        proxy=TELEGRAM_PROXY   # прокси из предыдущего обновления
+    )
     if REACTIONS_ENABLED:
         @client.on(events.Raw)
         async def raw_event_handler(event):
