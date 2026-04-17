@@ -1506,22 +1506,20 @@ async def main():
         else:
             logger.warning(f"Неподдерживаемый тип прокси: {TG_PROXY_TYPE}")
 
-    # Выбор класса соединения (с привязкой к интерфейсу или стандартный)
+    # Создание клиента Telegram с привязкой к интерфейсу, если задан TG_INTERFACE
     if TG_INTERFACE:
-        conn_class = BindToInterfaceConnection
-        conn_params = {'interface_name': TG_INTERFACE}
         logger.info(f"Telegram будет использовать интерфейс {TG_INTERFACE} (полная привязка SO_BINDTODEVICE)")
+        client = TelegramClient(
+            SESSION_NAME, API_ID, API_HASH,
+            proxy=proxy_params,
+            connection=BindToInterfaceConnection,
+            interface_name=TG_INTERFACE
+        )
     else:
-        from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
-        conn_class = ConnectionTcpAbridged
-        conn_params = {}
-
-    client = TelegramClient(
-        SESSION_NAME, API_ID, API_HASH,
-        proxy=proxy_params,
-        connection=conn_class,
-        connection_params=conn_params
-    )
+        client = TelegramClient(
+            SESSION_NAME, API_ID, API_HASH,
+            proxy=proxy_params
+        )
 
     client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
     if REACTIONS_ENABLED:
