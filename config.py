@@ -63,19 +63,16 @@ FAIL_MSG = "❌ Не удалось доставить сообщение в м�
 # Путь и имя файла записной книги
 #ADDRESSBOOK_PATH = "addressbook.json"
 
-# --------------------- Telegram Proxy / Шлюз ---------------------
-# None = прямое подключение
-# Поддерживаемые форматы:
-#   TELEGRAM_PROXY = None
-#   TELEGRAM_PROXY = ('socks5', '127.0.0.1', 1080)
-#   TELEGRAM_PROXY = ('http', 'proxy.example.com', 8080, 'user', 'pass')
-#   TELEGRAM_PROXY = {                     # MTProxy (самый частый вариант)
-#       'proxy_type': 'mtproxy',
-#       'addr': 'ваш_шлюз_из_table_200',
-#       'port': 443,
-#       'secret': 'ddxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'   # 32-байтный secret
-#   }
-#TELEGRAM_PROXY = None
+# === ПРОКСИ И ИНТЕРФЕЙС ДЛЯ TELEGRAM ===
+# Тип прокси: 'socks5', 'socks4', 'http' или None (без прокси)
+#TG_PROXY_TYPE = None  # например 'socks5'
+#TG_PROXY_HOST = None  # '127.0.0.1'
+#TG_PROXY_PORT = None  # 1080
+#TG_PROXY_USERNAME = None  # опционально
+#TG_PROXY_PASSWORD = None  # опционально
 
-#TELEGRAM_BIND_INTERFACE = "wg0"
+# Локальный IP-адрес (или имя интерфейса) для привязки сокетов Telegram.
+# Укажите IP, который принадлежит нужному интерфейсу (например '192.168.1.100').
+# Оставьте None для автоматического выбора.
+#TG_LOCAL_ADDRESS = None  # '192.168.1.100'
 

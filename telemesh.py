@@ -1,4 +1,4 @@
-
+# telemesh_1.5.007.py
 import sys
 import os
 import asyncio
@@ -23,10 +23,9 @@ from pubsub import pub
 import re
 import requests
 from urllib.parse import urlparse
-import socket
 
 # --------------------- Версия ---------------------
-VERSION = "1.5.009"
+VERSION = "1.5.007"
 
 # --------------------- Временные переменные ---------------------
 API_ID = None
@@ -156,18 +155,6 @@ try:
     from config import MSG_CACHE_MAX_SIZE
 except ImportError:
     MSG_CACHE_MAX_SIZE = 1000
-
-# --------------------- Telegram Proxy (новый параметр) ---------------------
-try:
-    from config import TELEGRAM_PROXY
-except ImportError:
-    TELEGRAM_PROXY = None
-
-# --------------------- Telegram: привязка к интерфейсу (awg0, wg0 и т.д.) ---------------------
-try:
-    from config import TELEGRAM_BIND_INTERFACE
-except ImportError:
-    TELEGRAM_BIND_INTERFACE = None
 
 # --------------------- Глобальные переменные ---------------------
 last_sender = None
@@ -301,7 +288,7 @@ CYR_TO_LAT_VISUAL = str.maketrans({
     'д': 'g', 'Д': 'D', 'е': 'e', 'Е': 'E', 'ё': 'e', 'Ё': 'E',
     'з': '3', 'З': '3', 'у': 'y', 'У': 'Y', 'к': 'k', 'К': 'K',
     'м': 'm', 'М': 'M', 'т': 't', 'Т': 'T', 'и': 'u', 'И': 'U',
-    'в': 'B', 'В': 'B', 'н': 'H', 'Н': 'H', 'п': "n", 'П': "П",
+    'в': 'B', 'В': 'B', 'н': 'H', 'Н': 'H', 'ь': "ь", 'Ь': "Ь",
 })
 
 # --------------------- Таблица маппинга реакций TG → Mesh ---------------------
@@ -1441,69 +1428,8 @@ async def main():
     logger.info(f"Target ID: !{DEST_NODE_ID}")
     if active_options_desc:
         logger.info(f"Активные опции: {', '.join(active_options_desc)}")
-    # ====================== TELEGRAM BIND INTERFACE ======================
-    # ВНИМАНИЕ: привязка применяется ТОЛЬКО для Telegram (Telethon)
-    # Meshtastic и остальные сетевые вызовы работают через интерфейс по умолчанию
-    original_socket = None
-
-    if TELEGRAM_BIND_INTERFACE:
-        logger.info(f"🔗 Telegram: привязка ТОЛЬКО Telegram к интерфейсу {TELEGRAM_BIND_INTERFACE}")
-
-        try:
-            original_socket = socket.socket
-
-            def bound_socket(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
-                sock = original_socket(family, type, proto)
-                try:
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
-                                    TELEGRAM_BIND_INTERFACE.encode('utf-8'))
-                    logger.debug(f"Telegram socket привязан к {TELEGRAM_BIND_INTERFACE}")
-                except PermissionError:
-                    logger.warning(f"⚠️ Не удалось привязать Telegram к {TELEGRAM_BIND_INTERFACE}. Запусти от root или выполни:")
-                    logger.warning(f"   sudo setcap cap_net_raw+ep {sys.executable}")
-                except Exception as e:
-                    logger.warning(f"Ошибка привязки Telegram к интерфейсу: {e}")
-                return sock
-
-            # Временно заменяем socket.socket только для Telethon
-            socket.socket = bound_socket
-
-        except Exception as e:
-            logger.error(f"Не удалось настроить привязку Telegram к интерфейсу: {e}")
-            original_socket = None
-    else:
-        logger.info("✅ Telegram: прямое подключение (без привязки к интерфейсу)")
-    # =====================================================================
-
-    client = TelegramClient(
-        SESSION_NAME,
-        API_ID,
-        API_HASH,
-        proxy=TELEGRAM_PROXY
-    )
-
-    # Запускаем Telegram (привязка уже активна)
-    if REACTIONS_ENABLED:
-        @client.on(events.Raw)
-        async def raw_event_handler(event):
-            if isinstance(event, UpdateMessageReactions):
-                await handle_reaction(event)
-
-    await client.start(phone=PHONE)
-
-    # ВОССТАНАВЛИВАЕМ оригинальный socket (чтобы Meshtastic и requests работали как раньше)
-    if original_socket is not None:
-        socket.socket = original_socket
-        logger.debug("Оригинальный socket.socket восстановлен (Meshtastic снова использует системный интерфейс по умолчанию)")
-
-    me = await client.get_me()
-    logger.info(f"Telegram: {me.first_name} ({me.phone})")
-    client = TelegramClient(
-        SESSION_NAME,
-        API_ID,
-        API_HASH,
-        proxy=TELEGRAM_PROXY   # прокси из предыдущего обновления
-    )
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
     if REACTIONS_ENABLED:
         @client.on(events.Raw)
         async def raw_event_handler(event):
