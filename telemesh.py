@@ -1,4 +1,3 @@
-# telemesh_1.5.007.py
 import sys
 import os
 import asyncio
