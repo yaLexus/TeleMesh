@@ -31,7 +31,7 @@ API_ID = None
 API_HASH = None
 PHONE = None
 DEST_NODE_ID = None
-ADMIN_CHAT_ID = None  # Загружается из файла с API_ID
+ADMIN_CHAT_ID = None
 
 # --------------------- Импорт конфигурации (Опциональный) ---------------------
 
@@ -106,7 +106,6 @@ except ImportError:
     MAX_RETRIES = 3
 
 # Импорт сообщения об ошибке. 
-# Если строка не пустая - уведомление включено. Если пустая - выключено.
 try:
     from config import FAIL_MSG
 except ImportError:
@@ -155,7 +154,7 @@ try:
 except ImportError:
     MSG_CACHE_MAX_SIZE = 1000
 
-# --------------------- ПРОКСИ И ПРИВЯЗКА К ИНТЕРФЕЙСУ ---------------------
+# --------------------- ПРОКСИ ДЛЯ TELEGRAM ---------------------
 try:
     from config import TG_PROXY_TYPE, TG_PROXY_HOST, TG_PROXY_PORT, TG_PROXY_USERNAME, TG_PROXY_PASSWORD
 except ImportError:
@@ -164,11 +163,6 @@ except ImportError:
     TG_PROXY_PORT = None
     TG_PROXY_USERNAME = None
     TG_PROXY_PASSWORD = None
-
-try:
-    from config import TG_INTERFACE
-except ImportError:
-    TG_INTERFACE = None
 
 # --------------------- Глобальные переменные ---------------------
 last_sender = None
@@ -222,52 +216,6 @@ if DEBUG:
 if MESSAGE_SEND_DELAY < 1000:
     logger.warning(f"MESSAGE_SEND_DELAY ({MESSAGE_SEND_DELAY}ms) слишком мал. Установлено минимальное значение 1000ms.")
     MESSAGE_SEND_DELAY = 1000
-
-# --------------------- КАСТОМНЫЙ КЛАСС СОЕДИНЕНИЯ ДЛЯ ПРИВЯЗКИ К ИНТЕРФЕЙСУ ---------------------
-import socket
-import asyncio
-from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
-
-class BindToInterfaceConnection(ConnectionTcpAbridged):
-    """Соединение Telethon с привязкой сокета к интерфейсу через SO_BINDTODEVICE."""
-    def __init__(self, *args, interface_name=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.interface_name = interface_name
-
-    async def _connect(self, address, timeout=None, ssl=None):
-        family = socket.AF_INET
-        if ':' in address[0]:
-            family = socket.AF_INET6
-
-        sock = socket.socket(family, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-
-        if self.interface_name:
-            try:
-                # SO_BINDTODEVICE = 25
-                sock.setsockopt(socket.SOL_SOCKET, 25, self.interface_name.encode())
-                logger.debug(f"Привязка сокета к интерфейсу {self.interface_name}")
-            except Exception as e:
-                logger.error(f"Не удалось установить SO_BINDTODEVICE: {e} (требуются права root)")
-
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.sock_connect(sock, address)
-        except Exception:
-            sock.close()
-            raise
-
-        sock.setblocking(False)
-        self._socket = sock
-
-        if ssl:
-            try:
-                self._socket = await loop.start_tls(self._socket, address, ssl=ssl, server_side=False)
-            except Exception:
-                self._socket.close()
-                raise
-
-        self._connected = True
 
 # --------------------- Функции сохранения/загрузки состояния пересылки ---------------------
 def save_forward_state():
@@ -807,11 +755,9 @@ def on_meshtastic_connect(interface, topic=None):
             logger.info("Meshtastic подключён → %s", my_info)
         else:
             logger.info(f"Meshtastic подключён. ID: !{MY_NODE_ID}, Name: {long_name} ({short_name})")
-        # Формируем приветственное сообщение в Mesh
         msg_lines = [f"📟 TeleMesh v{VERSION}", f"Node: {long_name} ({short_name})"]
         if not NO_WELCOME:
             send_to_meshtastic("\n".join(msg_lines), want_ack=False)
-        # Отправляем в Telegram Admin
         if ADMIN_CHAT_ID:
             status_lines = [
                 f"📟 TeleMesh v{VERSION} запущен",
@@ -836,7 +782,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
         if not decoded:
             return
         portnum = decoded.get('portnum')
-        # ACK
         if str(portnum) in ('3', 'ROUTING_APP'):
             request_id = decoded.get('requestId')
             ack_sender_id = packet.get('fromId') or packet.get('from')
@@ -849,7 +794,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                     if DEBUG:
                         logger.debug(f"Получен ACK для {request_id} от [!{normalize_node_id(ack_sender_id)}], но цель [!{DEST_NODE_ID}]. Игнорируем.")
             return
-        # Телеметрия
         if ENVIRONMENT_TELEGRAM_FORWARD or ENVIRONMENT_MESH_FORWARD:
             if str(portnum) in ('5', 'TELEMETRY_APP'):
                 telemetry = decoded.get('telemetry')
@@ -881,7 +825,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                 else:
                     if DEBUG:
                         logger.debug(f"Пакет телеметрии без environment/device metrics.")
-        # Текстовые сообщения
         if str(portnum) not in ('1', 'TEXT_MESSAGE_APP'):
             return
         to_id = packet.get('to') or packet.get('toId')
@@ -901,7 +844,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
         packet_id = packet.get('id')
         reply_id = decoded.get('replyId')
         emoji_flag = decoded.get('emoji')
-        # Реакции
         if emoji_flag and payload:
             try:
                 if isinstance(payload, bytes):
@@ -927,7 +869,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
         if not compare_node_ids(from_id, DEST_NODE_ID):
             logger.debug(f"Сообщение от !{normalize_node_id(from_id)}, но цель !{DEST_NODE_ID}. Игнорируем.")
             return
-        # Команды
         command, arg = parse_mesh_command(text)
         if command in ('start', 'stop'):
             if command == 'stop':
@@ -973,7 +914,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                     EVENT_LOOP
                 )
             return
-        # Отправка по слоту
         if text.startswith('!'):
             after_excl = text[1:].lstrip()
             match = re.match(r'^(\d+)\s+(.*)', after_excl)
@@ -989,7 +929,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                         EVENT_LOOP
                     )
                 return
-        # Отправка по @username
         if text.startswith('@'):
             match = re.match(r'^@([a-zA-Z0-9_]+)\s+(.*)', text)
             if match:
@@ -1004,7 +943,6 @@ def on_meshtastic_receive(packet, interface, topic=None):
                         EVENT_LOOP
                     )
                 return
-        # Если пересылка отключена - выходим
         if not forward_enabled:
             return
         logger.info(f"← Meshtastic от !{normalize_node_id(from_id)}: {text}")
@@ -1189,7 +1127,6 @@ async def handle_new_message(event):
     if sender.bot or sender.id == (await client.get_me()).id:
         return
     last_sender = sender.id
-    # Проверяем чёрный список
     if is_user_blacklisted(sender.id):
         logger.info(f"Сообщение от заблокированного пользователя {sender.id} игнорировано.")
         return
@@ -1474,7 +1411,6 @@ async def main():
     except Exception as e:
         logger.error(f"Ошибка конфига: {e}")
         sys.exit(1)
-    # Вывод версии и активных опций в лог
     active_options_desc = []
     if forward_enabled: active_options_desc.append("FORWARD_ENABLED (Пересылка)")
     if FAIL_MSG: active_options_desc.append("FAIL_MSG (Уведомления о недоставке)")
@@ -1489,8 +1425,7 @@ async def main():
     if active_options_desc:
         logger.info(f"Активные опции: {', '.join(active_options_desc)}")
 
-    # --------------------- НАСТРОЙКА TELEGRAM С ПРОКСИ И ПРИВЯЗКОЙ К ИНТЕРФЕЙСУ ---------------------
-    # Прокси
+    # --------------------- НАСТРОЙКА ПРОКСИ ДЛЯ TELEGRAM ---------------------
     proxy_params = None
     if TG_PROXY_TYPE and TG_PROXY_HOST and TG_PROXY_PORT:
         import socks
@@ -1506,20 +1441,7 @@ async def main():
         else:
             logger.warning(f"Неподдерживаемый тип прокси: {TG_PROXY_TYPE}")
 
-    # Создание клиента Telegram с привязкой к интерфейсу, если задан TG_INTERFACE
-    if TG_INTERFACE:
-        logger.info(f"Telegram будет использовать интерфейс {TG_INTERFACE} (полная привязка SO_BINDTODEVICE)")
-        client = TelegramClient(
-            SESSION_NAME, API_ID, API_HASH,
-            proxy=proxy_params,
-            connection=BindToInterfaceConnection,
-            interface_name=TG_INTERFACE
-        )
-    else:
-        client = TelegramClient(
-            SESSION_NAME, API_ID, API_HASH,
-            proxy=proxy_params
-        )
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH, proxy=proxy_params)
 
     client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
     if REACTIONS_ENABLED:

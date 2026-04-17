@@ -71,7 +71,4 @@ ENVIRONMENT_MESH_FORWARD = True # [False]
 #TG_PROXY_USERNAME = None  # опционально
 #TG_PROXY_PASSWORD = None  # опционально
 
-# === ПОЛНАЯ ПРИВЯЗКА TELEGRAM К СЕТЕВОМУ ИНТЕРФЕЙСУ ===
-# Имя интерфейса (например, 'eth0', 'wlan0'). Только Linux, требуются права root.
-#TG_INTERFACE = None  # 'eth0'
 
