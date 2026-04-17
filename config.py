@@ -63,12 +63,9 @@ ENVIRONMENT_MESH_FORWARD = True # [False]
 # Путь и имя файла записной книги
 #ADDRESSBOOK_PATH = "addressbook.json"
 
-# === ПРОКСИ И ИНТЕРФЕЙС ДЛЯ TELEGRAM ===
-# Тип прокси: 'socks5', 'socks4', 'http' или None (без прокси)
-#TG_PROXY_TYPE = None  # например 'socks5'
-#TG_PROXY_HOST = None  # '127.0.0.1'
-#TG_PROXY_PORT = None  # 1080
-#TG_PROXY_USERNAME = None  # опционально
-#TG_PROXY_PASSWORD = None  # опционально
-
+# === MTProto прокси для Telegram ===
+#TG_MT_PROXY_ENABLED = True   # True — использовать MTProto прокси
+#TG_MT_PROXY_HOST = "bestproxy.ink"
+#TG_MT_PROXY_PORT = 443
+#TG_MT_PROXY_SECRET = "eed68360458af63073bac1394e8c7a48da6265737470726f78792e696e6b"
 

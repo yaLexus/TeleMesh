@@ -1,3 +1,4 @@
+# telemesh_1.5.009.py
 import sys
 import os
 import asyncio
@@ -13,6 +14,7 @@ from telethon import TelegramClient, events, functions
 from telethon.sessions import StringSession
 from telethon.tl.types import PeerUser, UpdateMessageReactions, ReactionEmoji
 from telethon.tl import types
+from telethon.network.connection import ConnectionTcpMTProxyRandomizedIntermediate
 
 import meshtastic
 from meshtastic.serial_interface import SerialInterface
@@ -33,13 +35,22 @@ PHONE = None
 DEST_NODE_ID = None
 ADMIN_CHAT_ID = None
 
-# --------------------- Импорт конфигурации (Опциональный) ---------------------
+# --------------------- Импорт конфигурации ---------------------
 
 # Параметры подключения к Telegram
 try:
     from config import SESSION_NAME
 except ImportError:
     SESSION_NAME = "telemesh_session"
+
+# MTProto прокси
+try:
+    from config import TG_MT_PROXY_ENABLED, TG_MT_PROXY_HOST, TG_MT_PROXY_PORT, TG_MT_PROXY_SECRET
+except ImportError:
+    TG_MT_PROXY_ENABLED = False
+    TG_MT_PROXY_HOST = None
+    TG_MT_PROXY_PORT = None
+    TG_MT_PROXY_SECRET = None
 
 # Параметры Meshtastic
 try:
@@ -89,7 +100,6 @@ except ImportError:
     SIGNATURE = """
 📡 Отправлено из меш-сети с помощью 📟 **TeleMesh**"""
 
-# Попытка импортировать параметры отладки и таймаутов
 try:
     from config import DEBUG
 except ImportError:
@@ -105,19 +115,16 @@ try:
 except ImportError:
     MAX_RETRIES = 3
 
-# Импорт сообщения об ошибке. 
 try:
     from config import FAIL_MSG
 except ImportError:
     FAIL_MSG = ""
 
-# Опция включения транслитерации
 try:
     from config import TRANSLIT_ENABLED
 except ImportError:
     TRANSLIT_ENABLED = True
 
-# Опции телеметрии
 try:
     from config import ENVIRONMENT_TELEGRAM_FORWARD
 except ImportError:
@@ -128,41 +135,25 @@ try:
 except ImportError:
     ENVIRONMENT_MESH_FORWARD = False
 
-# --------------------- НОВЫЕ ОПЦИИ КОНФИГУРАЦИИ ---------------------
-
-# Включить поддержку реакций TG → Mesh
 try:
     from config import REACTIONS_ENABLED
 except ImportError:
     REACTIONS_ENABLED = True
 
-# Включить поддержку reply из Mesh → конкретному автору в TG
 try:
     from config import REPLY_TRACKING_ENABLED
 except ImportError:
     REPLY_TRACKING_ENABLED = True
 
-# Время хранения кэша сообщений (в секундах), по умолчанию 24 часа
 try:
     from config import MSG_CACHE_TTL
 except ImportError:
     MSG_CACHE_TTL = 86400
 
-# Максимальный размер кэша сообщений
 try:
     from config import MSG_CACHE_MAX_SIZE
 except ImportError:
     MSG_CACHE_MAX_SIZE = 1000
-
-# --------------------- ПРОКСИ ДЛЯ TELEGRAM ---------------------
-try:
-    from config import TG_PROXY_TYPE, TG_PROXY_HOST, TG_PROXY_PORT, TG_PROXY_USERNAME, TG_PROXY_PASSWORD
-except ImportError:
-    TG_PROXY_TYPE = None
-    TG_PROXY_HOST = None
-    TG_PROXY_PORT = None
-    TG_PROXY_USERNAME = None
-    TG_PROXY_PASSWORD = None
 
 # --------------------- Глобальные переменные ---------------------
 last_sender = None
@@ -171,32 +162,18 @@ telegram_queue = queue.Queue()
 MY_NODE_ID = None
 interface = None
 
-# Словарь для отслеживания сообщений, ожидающих обработки
 pending_acks = {}
 pending_acks_lock = Lock()
 ack_event_queue = queue.Queue()
 
-# --------------------- НОВЫЕ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---------------------
-
-# Кэш сопоставления: mesh_packet_id -> {tg_user_id, tg_msg_id, timestamp}
 mesh_msg_cache = OrderedDict()
 tg_to_mesh_cache = OrderedDict()
-
-# Записная книжка: {slot: {'id': int, 'name': str, 'username': str}}
 contact_book = {}
 contact_book_lock = Lock()
-
-# Чёрный список: {slot: {'id': int, 'name': str, 'username': str}}
 blacklist = {}
 blacklist_lock = Lock()
-
-# Ссылка на event loop
 EVENT_LOOP = None
-
-# Флаг отключения приветственного сообщения в Mesh (из командной строки)
 NO_WELCOME = False
-
-# Пути к файлам
 CONTACT_BOOK_FILE = None
 BLACKLIST_FILE = None
 STATE_FILE = None
@@ -212,12 +189,11 @@ logger = logging.getLogger("TeleMesh")
 if DEBUG:
     logger.debug("Режим отладки (DEBUG) ВКЛЮЧЕН.")
 
-# Проверка минимальной задержки отправки
 if MESSAGE_SEND_DELAY < 1000:
-    logger.warning(f"MESSAGE_SEND_DELAY ({MESSAGE_SEND_DELAY}ms) слишком мал. Установлено минимальное значение 1000ms.")
+    logger.warning(f"MESSAGE_SEND_DELAY ({MESSAGE_SEND_DELAY}ms) слишком мал. Установлено 1000ms.")
     MESSAGE_SEND_DELAY = 1000
 
-# --------------------- Функции сохранения/загрузки состояния пересылки ---------------------
+# --------------------- Функции сохранения/загрузки состояния ---------------------
 def save_forward_state():
     if STATE_FILE is None:
         return
@@ -241,7 +217,7 @@ def load_forward_state():
     except Exception as e:
         logger.error(f"Ошибка загрузки состояния пересылки: {e}")
 
-# --------------------- Функции управления кэшем ---------------------
+# --------------------- Кэш сообщений ---------------------
 def cache_add_mesh_message(mesh_packet_id, tg_user_id, tg_msg_id):
     if not REPLY_TRACKING_ENABLED:
         return
@@ -289,7 +265,7 @@ def cache_cleanup():
     if expired_mesh or expired_tg:
         logger.debug(f"Кэш очищен: {len(expired_mesh)} mesh записей, {len(expired_tg)} tg записей")
 
-# --------------------- Таблица транслитерации ---------------------
+# --------------------- Транслитерация ---------------------
 CYR_TO_LAT_VISUAL = str.maketrans({
     'а': 'a', 'А': 'A', 'б': '6', 'Б': '6', 'с': 'c', 'С': 'C',
     'о': 'o', 'О': 'O', 'р': 'p', 'Р': 'P', 'х': 'x', 'Х': 'X',
@@ -299,7 +275,7 @@ CYR_TO_LAT_VISUAL = str.maketrans({
     'в': 'B', 'В': 'B', 'н': 'H', 'Н': 'H', 'ь': "ь", 'Ь': "Ь",
 })
 
-# --------------------- Таблица маппинга реакций TG → Mesh ---------------------
+# --------------------- Реакции ---------------------
 REACTION_MAPPING = {
     '👍': 0x1F44D, '👎': 0x1F44E, '❤️': 0x2764, '💔': 0x1F494, '😂': 0x1F602,
     '😮': 0x1F62E, '😢': 0x1F622, '😡': 0x1F621, '🔥': 0x1F525, '🎉': 0x1F389,
@@ -326,7 +302,7 @@ def clean_emoji_for_telegram(emoji_str):
         return result[0]
     return emoji_str
 
-# --------------------- Функции для работы с ID нод ---------------------
+# --------------------- ID нод ---------------------
 def normalize_node_id(node_id):
     if node_id is None: return None
     if isinstance(node_id, int):
@@ -348,7 +324,7 @@ def compare_node_ids(id1, id2):
     if DEBUG: logger.debug(f"Сравнение ID: {id1}->{n1}, {id2}->{n2}")
     return n1 == n2
 
-# --------------------- Нормализация текста для распознавания команд ---------------------
+# --------------------- Команды ---------------------
 LAT_TO_CYR_MAP = {
     'c': 'с', 'a': 'а', 'o': 'о', 'p': 'р', 'x': 'х', 'y': 'у',
     'e': 'е', 'k': 'к', 'm': 'м', 't': 'т', 'b': 'в', 'h': 'н',
@@ -366,14 +342,11 @@ def normalize_command_str(text: str) -> str:
         result = result.replace(lat, cyr)
     return result
 
-# Команды для записной книжки (префикс !)
 COMMAND_START = {normalize_command_str(cmd) for cmd in ['!start', '!старт', '!cтapт']}
 COMMAND_STOP = {normalize_command_str(cmd) for cmd in ['!stop', '!стоп', '!cтoп']}
 COMMAND_ADD = {normalize_command_str(cmd) for cmd in ['!add', '!добавить', '!дoбaвить']}
 COMMAND_LIST = {normalize_command_str(cmd) for cmd in ['!list', '!список', '!cпиcoк']}
 COMMAND_DEL = {normalize_command_str(cmd) for cmd in ['!del', '!удалить', '!yдaлить']}
-
-# Команды для чёрного списка (префикс #)
 COMMAND_BLACKLIST_ADD = {normalize_command_str(cmd) for cmd in ['#add', '#добавить', '#дoбaвить']}
 COMMAND_BLACKLIST_LIST = {normalize_command_str(cmd) for cmd in ['#list', '#список', '#cпиcoк']}
 COMMAND_BLACKLIST_DEL = {normalize_command_str(cmd) for cmd in ['#del', '#удалить', '#yдaлить']}
@@ -406,7 +379,7 @@ def parse_mesh_command(text: str):
         return command, arg
     return None, None
 
-# --------------------- Записная книжка ---------------------
+# --------------------- Записная книжка и чёрный список ---------------------
 def load_contacts():
     global contact_book
     if CONTACT_BOOK_FILE is None:
@@ -496,7 +469,6 @@ def format_list(book, title):
                 lines.append(f"{slot}: {name}")
         return "\n".join(lines)
 
-# --------------------- Чёрный список ---------------------
 def load_blacklist():
     global blacklist
     if BLACKLIST_FILE is None:
@@ -532,7 +504,7 @@ def is_user_blacklisted(tg_user_id):
                 return True
         return False
 
-# --------------------- Обработчики команд для чёрного списка ---------------------
+# --------------------- Обработчики команд ---------------------
 async def handle_blacklist_command(command, arg, original_user_id, packet_id):
     try:
         if command == 'blacklist_add':
@@ -577,7 +549,6 @@ async def handle_blacklist_command(command, arg, original_user_id, packet_id):
         logger.error(f"Ошибка обработки команды {command}: {e}", exc_info=True)
         send_to_meshtastic(f"⚠️ Ошибка при обработке команды: {e}", want_ack=False)
 
-# --------------------- Обработчик команд записной книжки ---------------------
 async def handle_contact_command(command, arg, original_user_id, packet_id):
     try:
         if command == 'add':
@@ -622,7 +593,6 @@ async def handle_contact_command(command, arg, original_user_id, packet_id):
         logger.error(f"Ошибка обработки команды {command}: {e}", exc_info=True)
         send_to_meshtastic(f"⚠️ Ошибка при обработке команды: {e}", want_ack=False)
 
-# --------------------- Отправка в Telegram по слоту/юзернейму ---------------------
 async def send_to_contact_by_slot(slot: int, message: str, mesh_packet_id: int = None):
     contact = get_contact_by_slot(contact_book, slot)
     if not contact:
@@ -674,7 +644,7 @@ async def send_to_contact_by_username(username: str, message: str, mesh_packet_i
     response = f"✅ Сообщение отправлено пользователю @{username}"
     send_to_meshtastic(response, want_ack=False)
 
-# --------------------- Загрузка параметров ---------------------
+# --------------------- Загрузка параметров аккаунта ---------------------
 def load_acc_data(config_file):
     full_path = os.path.join(ACC_BD_PATH, config_file)
     if not os.path.exists(full_path):
@@ -1384,6 +1354,8 @@ async def main():
     if not config_file:
         print(f"Использование: python {sys.argv[0]} <файл_параметров> [--no-welcome]")
         sys.exit(1)
+
+    # Логирование опций
     if not (ENVIRONMENT_TELEGRAM_FORWARD or ENVIRONMENT_MESH_FORWARD):
         logger.info("Трансляция телеметрии отключена.")
     else:
@@ -1396,6 +1368,7 @@ async def main():
         logger.info("Поддержка реакций TG→Mesh ВКЛЮЧЕНА.")
     if REPLY_TRACKING_ENABLED:
         logger.info("Отслеживание reply Mesh→TG ВКЛЮЧЕНО.")
+
     try:
         API_ID, API_HASH, PHONE, raw_dest_id, ADMIN_CHAT_ID = load_acc_data(config_file)
         DEST_NODE_ID = normalize_node_id(raw_dest_id)
@@ -1411,6 +1384,7 @@ async def main():
     except Exception as e:
         logger.error(f"Ошибка конфига: {e}")
         sys.exit(1)
+
     active_options_desc = []
     if forward_enabled: active_options_desc.append("FORWARD_ENABLED (Пересылка)")
     if FAIL_MSG: active_options_desc.append("FAIL_MSG (Уведомления о недоставке)")
@@ -1425,23 +1399,22 @@ async def main():
     if active_options_desc:
         logger.info(f"Активные опции: {', '.join(active_options_desc)}")
 
-    # --------------------- НАСТРОЙКА ПРОКСИ ДЛЯ TELEGRAM ---------------------
+    # --------------------- НАСТРОЙКА MTProto ПРОКСИ ---------------------
     proxy_params = None
-    if TG_PROXY_TYPE and TG_PROXY_HOST and TG_PROXY_PORT:
-        import socks
-        proxy_type_map = {
-            'socks5': socks.SOCKS5,
-            'socks4': socks.SOCKS4,
-            'http': socks.HTTP,
-        }
-        ptype = proxy_type_map.get(TG_PROXY_TYPE.lower())
-        if ptype:
-            proxy_params = (ptype, TG_PROXY_HOST, TG_PROXY_PORT, TG_PROXY_USERNAME, TG_PROXY_PASSWORD)
-            logger.info(f"Telegram прокси настроен: {TG_PROXY_TYPE}://{TG_PROXY_HOST}:{TG_PROXY_PORT}")
-        else:
-            logger.warning(f"Неподдерживаемый тип прокси: {TG_PROXY_TYPE}")
+    connection_class = None
+    if TG_MT_PROXY_ENABLED and TG_MT_PROXY_HOST and TG_MT_PROXY_PORT and TG_MT_PROXY_SECRET:
+        proxy_params = (TG_MT_PROXY_HOST, TG_MT_PROXY_PORT, TG_MT_PROXY_SECRET)
+        connection_class = ConnectionTcpMTProxyRandomizedIntermediate
+        logger.info(f"MTProto прокси включён: {TG_MT_PROXY_HOST}:{TG_MT_PROXY_PORT}")
+    else:
+        logger.info("MTProto прокси не используется")
 
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH, proxy=proxy_params)
+    # Создание клиента Telegram
+    client = TelegramClient(
+        SESSION_NAME, API_ID, API_HASH,
+        proxy=proxy_params,
+        connection=connection_class
+    )
 
     client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
     if REACTIONS_ENABLED:
