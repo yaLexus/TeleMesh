@@ -59,3 +59,23 @@ FAIL_MSG = "❌ Не удалось доставить сообщение в м�
 
 # Максимальный размер кэша сообщений
 #MSG_CACHE_MAX_SIZE = 1000
+
+# Путь и имя файла записной книги
+#ADDRESSBOOK_PATH = "addressbook.json"
+
+# --------------------- Telegram Proxy / Шлюз ---------------------
+# None = прямое подключение
+# Поддерживаемые форматы:
+#   TELEGRAM_PROXY = None
+#   TELEGRAM_PROXY = ('socks5', '127.0.0.1', 1080)
+#   TELEGRAM_PROXY = ('http', 'proxy.example.com', 8080, 'user', 'pass')
+#   TELEGRAM_PROXY = {                     # MTProxy (самый частый вариант)
+#       'proxy_type': 'mtproxy',
+#       'addr': 'ваш_шлюз_из_table_200',
+#       'port': 443,
+#       'secret': 'ddxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'   # 32-байтный secret
+#   }
+try:
+    from config import TELEGRAM_PROXY
+except ImportError:
+    TELEGRAM_PROXY = None

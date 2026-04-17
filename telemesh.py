@@ -25,7 +25,7 @@ import requests
 from urllib.parse import urlparse
 
 # --------------------- Версия ---------------------
-VERSION = "1.5.008"
+VERSION = "1.5.009"
 
 # --------------------- Временные переменные ---------------------
 API_ID = None
@@ -155,6 +155,12 @@ try:
     from config import MSG_CACHE_MAX_SIZE
 except ImportError:
     MSG_CACHE_MAX_SIZE = 1000
+
+# --------------------- Telegram Proxy (новый параметр) ---------------------
+try:
+    from config import TELEGRAM_PROXY
+except ImportError:
+    TELEGRAM_PROXY = None
 
 # --------------------- Глобальные переменные ---------------------
 last_sender = None
@@ -1428,8 +1434,19 @@ async def main():
     logger.info(f"Target ID: !{DEST_NODE_ID}")
     if active_options_desc:
         logger.info(f"Активные опции: {', '.join(active_options_desc)}")
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-    client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
+    # ====================== TELEGRAM PROXY ======================
+    if TELEGRAM_PROXY:
+        logger.info(f"✅ Telegram: подключение через прокси/шлюз {TELEGRAM_PROXY}")
+    else:
+        logger.info("✅ Telegram: прямое подключение (без прокси)")
+    # ===========================================================
+
+    client = TelegramClient(
+        SESSION_NAME,
+        API_ID,
+        API_HASH,
+        proxy=TELEGRAM_PROXY   # ← вот главный параметр
+    )    client.add_event_handler(handle_new_message, events.NewMessage(incoming=True))
     if REACTIONS_ENABLED:
         @client.on(events.Raw)
         async def raw_event_handler(event):
